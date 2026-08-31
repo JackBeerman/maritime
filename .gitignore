@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Virtual environment
+venv/
+
+# Data (large, re-downloadable -- lives on /scratch, not in git)
+data/ais/*.csv
+data/ais/*.zip
+data/ne_10m_land/
+data/ports_denmark.csv
+
+# Training artifacts
+checkpoints/*.pt
+logs/*.out
+logs/*.err
+
+# Container
+*.sif
+.apptainer/
+
+# Generated plots/animations (regenerate from notebooks, don't commit binaries)
+*.gif
+*.png
+
+# OS
+.DS_Store

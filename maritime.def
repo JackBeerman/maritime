@@ -1,0 +1,38 @@
+Bootstrap: docker
+From: pytorch/pytorch:2.9.0-cuda12.4-cudnn9-runtime
+
+%labels
+    Application maritime-gc-vtp
+    Version 1.0
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libgdal-dev \
+        gdal-bin \
+        && rm -rf /var/lib/apt/lists/*
+
+    # torch_geometric's pip package auto-detects the installed torch/CUDA
+    # build and pulls the matching wheel -- no separate index URL needed
+    # as long as torch is already installed (it is, via the base image).
+    pip install --no-cache-dir \
+        torch_geometric \
+        shapely==2.1.2 \
+        geopandas \
+        pandas \
+        scipy \
+        numpy
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+
+%runscript
+    exec python3 "$@"
+
+%help
+    Container for the maritime GC-VTP rebuild: mesh construction (shapely/
+    scipy), heterogeneous GNN + cached transformer + FGN head (torch,
+    torch_geometric), and AIS/coastline ingestion (geopandas, pandas).
+    Build with: apptainer build maritime.sif maritime.def

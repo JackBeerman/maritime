@@ -1,15 +1,23 @@
-# Maritime Vessel Trajectory Prediction (GC-VTP)
+# Maritime Vessel Trajectory Prediction
 
-Goal-conditioned vessel trajectory prediction: forecasts a single "ego"
-vessel's future positions from its recent AIS track, the traffic around
-it, and the surrounding coastline/port geometry. Outputs a distribution
-of plausible future paths rather than a single point estimate, using a
-functional-generative sampling head inspired by DeepMind's WeatherNext
-(FGN) architecture.
+Predicts a single "ego" vessel's future positions from its recent AIS
+track, the traffic around it, and the surrounding coastline/port
+geometry — outputting a distribution of plausible future paths rather
+than a single point estimate.
+
+The architecture and key design choices are directly inspired by
+DeepMind's weather forecasting lineage: a triangulated spatial mesh with
+graph-neural-network message passing (GraphCast), and a functional
+generative sampling head that produces many trajectory samples per
+forward pass instead of one deterministic output (WeatherNext's FGN).
+Most notably, the model predicts a **normalized residual displacement
+from the last known position**, not an absolute coordinate — the same
+residual-prediction approach GraphCast uses for atmospheric state, and
+the single fix that took this model's predicted uncertainty from
+uncorrelated-with-reality to a real, meaningful signal (see Validation).
 
 Currently configured for Danish waters, using the Danish Maritime
-Authority's public AIS archive. An earlier South China Sea configuration
-exists but is shelved (see "Alternate domain" below).
+Authority's public AIS archive.
 
 ## Architecture
 
@@ -30,13 +38,6 @@ exists but is shelved (see "Alternate domain" below).
    independent future trajectory samples per window, trained with an
    energy-score loss that rewards both accuracy and appropriate sample
    diversity.
-
-The model predicts **normalized displacement from the last known
-position**, not absolute coordinates — this matches GraphCast's
-documented approach of predicting a residual update rather than an
-absolute state, and was essential for getting the model's predicted
-uncertainty to actually track real vessel movement (see Validation
-below).
 
 ## Setup
 
@@ -91,16 +92,17 @@ starts fresh — safe to always include.
 
 ## Key design decisions
 
+- **Delta targets + unit-variance normalization** — predicting
+  normalized displacement rather than absolute coordinates, matching
+  GraphCast's documented residual-prediction approach. Empirically
+  improved the correlation between predicted uncertainty and actual
+  displacement from ~0 to a real, meaningful positive relationship (see
+  Validation).
 - **Stratified vessel sampling** (`ais_ingest.select_ego_vessels_stratified`)
   — training deliberately balances underway and stationary/anchored
   vessels, rather than excluding either. Excluding stationary vessels
   would leave the model unable to correctly predict "stays put," which
   is a common and valid real-world outcome.
-- **Delta targets + unit-variance normalization** — predicting
-  normalized displacement rather than absolute coordinates. Empirically
-  improved the correlation between predicted uncertainty and actual
-  displacement from ~0 to a real, meaningful positive relationship (see
-  Validation).
 - **NaN-safe resampling** — real AIS data has legitimately blank
   SOG/COG on some pings; `resample_to_snapshots` checks all of
   lon/lat/SOG/COG (not just position) before accepting a timestep.
@@ -118,12 +120,6 @@ This was an early, small-scale run intended to validate the pipeline,
 not a final result — see `train_gcvtp.slurm` for the full-scale
 configuration.
 
-## Alternate domain (shelved)
-
-An earlier version targeted the South China Sea (`test_pipeline.ipynb`,
-`SCS_BOUNDS` in `coastline.py`). Kept for possible future use; not
-maintained alongside the Danish configuration.
-
 ## Repo structure
 mesh.py -- spatial mesh construction
 coastline.py -- coastline/port loading, domain bounds
@@ -135,4 +131,4 @@ losses.py -- energy score loss
 train.py -- standalone training script (SLURM-ready)
 inference.py -- multi-step rollout / forecasting
 train_gcvtp.slurm -- SLURM batch script
-test_pipeline_denmark.ipynb -- interactive exploration (Danish waters)
+test_pipeline_denmark.ipynb -- interactive exploration notebook

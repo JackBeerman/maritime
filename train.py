@@ -130,7 +130,6 @@ def main():
     model = GCVTP(mesh_in=4, vessel_in=8, hidden=args.hidden, future_len=args.future_len,
                   n_heads=args.n_heads, n_layers=args.n_layers, max_cache_len=64).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    goal_xy = torch.full((1, 2), float('nan'), device=device)
 
     norm_scale = None
     start_epoch = 0
@@ -164,7 +163,7 @@ def main():
             last_ctx_pos = ctx[-1]['vessel'].x[ego_idx_this_window[-1], :2]
             target_delta = (target - last_ctx_pos.unsqueeze(0)) / norm_scale
 
-            samples = model(ctx, ego_idx_this_window, goal_xy, n_samples=args.n_samples, training=True)
+            samples = model(ctx, ego_idx_this_window, n_samples=args.n_samples, training=True)
             loss = energy_score_loss(samples, target_delta.unsqueeze(0))
 
             opt.zero_grad()

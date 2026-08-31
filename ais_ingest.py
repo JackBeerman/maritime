@@ -107,12 +107,36 @@ def resample_to_snapshots(df, interval_minutes=15):
     return snapshots
 
 
+def one_hot_vessel_type(type_ids, n_types=None):
+    """One-hot encodes vessel type IDs -- fed as a raw integer, the network
+    would otherwise implicitly treat 'fishing' (2) as numerically between
+    'tanker' (1) and 'passenger' (3), a false ordinal relationship for a
+    categorical variable."""
+    if n_types is None:
+        n_types = len(VESSEL_TYPE_VOCAB)
+    type_ids = type_ids.astype(int)
+    onehot = np.zeros((len(type_ids), n_types))
+    onehot[np.arange(len(type_ids)), type_ids] = 1.0
+    return onehot
+
+
 def build_snapshot_sequence(snapshots, mesh_node_features, mesh_edge_index,
                              ego_mmsi, min_vessels_per_snapshot=1):
     """
     Converts the {timestamp: {mmsi: state}} dict into an ordered list of
     HeteroData graphs plus the ego vessel's row-index at each timestep,
     for timestamps where the ego vessel is actually present.
+
+    Vessel feature layout: [lon, lat, sog, cog_sin, cog_cos, *type_onehot]
+    -- lon/lat kept as raw real-world degrees (k-NN graph construction,
+    target/displacement computation, and plotting all depend on reading
+    columns 0-1 as real coordinates elsewhere in the pipeline); sog stays
+    raw too (normalized only inside the model, at the point of
+    consumption). COG is encoded as sin/cos rather than a raw 0-359
+    scalar, since a raw scalar would tell the network that 359 degrees
+    and 1 degree are nearly maximally different, when they're actually
+    2 degrees apart. Vessel type is one-hot encoded (see
+    one_hot_vessel_type) rather than left as a raw ordinal-looking integer.
     """
     timestamps = sorted(snapshots.keys())
     seq, ego_idx_per_step = [], []
@@ -122,9 +146,16 @@ def build_snapshot_sequence(snapshots, mesh_node_features, mesh_edge_index,
             continue
         mmsi_list = list(vessels.keys())
         ego_idx = mmsi_list.index(ego_mmsi)
-        vessel_states = np.stack([vessels[m] for m in mmsi_list])
-        pad = np.zeros((vessel_states.shape[0], 3))
-        vessel_states = np.concatenate([vessel_states, pad], axis=1)
+        raw = np.stack([vessels[m] for m in mmsi_list])  # (V, 5): lon, lat, sog, cog, type_id
+
+        cog_rad = np.radians(raw[:, 3])
+        cog_sin = np.sin(cog_rad)[:, None]
+        cog_cos = np.cos(cog_rad)[:, None]
+        type_onehot = one_hot_vessel_type(raw[:, 4])
+
+        vessel_states = np.concatenate(
+            [raw[:, 0:3], cog_sin, cog_cos, type_onehot], axis=1
+        )  # (V, 3 + 2 + n_types)
 
         data = build_hetero_snapshot(
             mesh_node_features, mesh_edge_index, vessel_states, ego_idx

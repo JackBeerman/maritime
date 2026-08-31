@@ -2,13 +2,31 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import HeteroConv, SAGEConv
 from cached_attention import CachedTemporalTransformer, KVCache
+from coastline import DMA_BOUNDS
 
 
 class MeshVesselGNN(nn.Module):
-    def __init__(self, mesh_in=4, vessel_in=8, hidden=128):
+    """
+    Normalizes lon/lat (centered and scaled to the domain bounds) and SOG
+    (scaled by a typical max speed) internally, right before the linear
+    projection into the network -- this only affects what the network
+    sees, not the stored data['mesh'].x / data['vessel'].x tensors
+    themselves, since k-NN graph construction, target/displacement
+    computation, and plotting elsewhere in the pipeline all depend on
+    those columns holding raw real-world coordinates.
+    """
+    def __init__(self, mesh_in=4, vessel_in=12, hidden=128, bounds=DMA_BOUNDS, max_sog_knots=30.0):
         super().__init__()
         self.mesh_proj = nn.Linear(mesh_in, hidden)
         self.vessel_proj = nn.Linear(vessel_in, hidden)
+
+        min_lon, min_lat, max_lon, max_lat = bounds
+        self.register_buffer('lon_center', torch.tensor((min_lon + max_lon) / 2, dtype=torch.float))
+        self.register_buffer('lon_scale', torch.tensor((max_lon - min_lon) / 2, dtype=torch.float))
+        self.register_buffer('lat_center', torch.tensor((min_lat + max_lat) / 2, dtype=torch.float))
+        self.register_buffer('lat_scale', torch.tensor((max_lat - min_lat) / 2, dtype=torch.float))
+        self.max_sog_knots = max_sog_knots
+
         conv_spec = {
             ('vessel', 'near', 'mesh'): SAGEConv((hidden, hidden), hidden),
             ('mesh', 'rev_near', 'vessel'): SAGEConv((hidden, hidden), hidden),
@@ -24,10 +42,24 @@ class MeshVesselGNN(nn.Module):
         }
         self.conv2 = HeteroConv(conv_spec2, aggr='mean')
 
+    def _normalize_lonlat(self, lon, lat):
+        return (lon - self.lon_center) / self.lon_scale, (lat - self.lat_center) / self.lat_scale
+
+    def _normalize_mesh_features(self, x):
+        lon_n, lat_n = self._normalize_lonlat(x[:, 0:1], x[:, 1:2])
+        return torch.cat([lon_n, lat_n, x[:, 2:]], dim=-1)
+
+    def _normalize_vessel_features(self, x):
+        lon_n, lat_n = self._normalize_lonlat(x[:, 0:1], x[:, 1:2])
+        sog_n = x[:, 2:3] / self.max_sog_knots
+        return torch.cat([lon_n, lat_n, sog_n, x[:, 3:]], dim=-1)
+
     def forward(self, data):
+        mesh_x = self._normalize_mesh_features(data['mesh'].x)
+        vessel_x = self._normalize_vessel_features(data['vessel'].x)
         x_dict = {
-            'mesh': torch.relu(self.mesh_proj(data['mesh'].x)),
-            'vessel': torch.relu(self.vessel_proj(data['vessel'].x)),
+            'mesh': torch.relu(self.mesh_proj(mesh_x)),
+            'vessel': torch.relu(self.vessel_proj(vessel_x)),
         }
         edge_index_dict = data.edge_index_dict
         x_dict = self.conv1(x_dict, edge_index_dict)
@@ -66,10 +98,11 @@ class FGNDecoderHead(nn.Module):
 
 
 class GCVTP(nn.Module):
-    def __init__(self, mesh_in=4, vessel_in=8, hidden=128, future_len=4,
-                 n_heads=4, n_layers=3, max_cache_len=256):
+    def __init__(self, mesh_in=4, vessel_in=12, hidden=128, future_len=4,
+                 n_heads=4, n_layers=3, max_cache_len=256, bounds=DMA_BOUNDS,
+                 max_sog_knots=30.0):
         super().__init__()
-        self.gnn = MeshVesselGNN(mesh_in, vessel_in, hidden)
+        self.gnn = MeshVesselGNN(mesh_in, vessel_in, hidden, bounds=bounds, max_sog_knots=max_sog_knots)
         self.temporal = CachedTemporalTransformer(hidden, n_heads, n_layers, max_cache_len)
         self.head = FGNDecoderHead(hidden, future_len)
         self.hidden = hidden

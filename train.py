@@ -231,7 +231,7 @@ def main():
 
     loader = DataLoader(train_combined, batch_size=1, shuffle=True, collate_fn=collate_single)
 
-    model = GCVTP(mesh_in=4, vessel_in=8, hidden=args.hidden, future_len=args.future_len,
+    model = GCVTP(mesh_in=4, vessel_in=12, hidden=args.hidden, future_len=args.future_len,
                   n_heads=args.n_heads, n_layers=args.n_layers, max_cache_len=64).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
 

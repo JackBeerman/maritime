@@ -121,11 +121,17 @@ def one_hot_vessel_type(type_ids, n_types=None):
 
 
 def build_snapshot_sequence(snapshots, mesh_node_features, mesh_edge_index,
-                             ego_mmsi, min_vessels_per_snapshot=1):
+                             ego_mmsi, min_vessels_per_snapshot=1,
+                             mesh_x_tensor=None, mesh_edge_tensor=None, mesh_tree=None):
     """
     Converts the {timestamp: {mmsi: state}} dict into an ordered list of
     HeteroData graphs plus the ego vessel's row-index at each timestep,
     for timestamps where the ego vessel is actually present.
+
+    mesh_x_tensor/mesh_edge_tensor/mesh_tree: pass precomputed versions
+    (built once outside this function) to avoid rebuilding them on every
+    single timestep -- see build_hetero_snapshot's docstring for why
+    this matters a lot at real scale.
 
     Vessel feature layout: [lon, lat, sog, cog_sin, cog_cos, *type_onehot]
     -- lon/lat kept as raw real-world degrees (k-NN graph construction,
@@ -158,7 +164,8 @@ def build_snapshot_sequence(snapshots, mesh_node_features, mesh_edge_index,
         )  # (V, 3 + 2 + n_types)
 
         data = build_hetero_snapshot(
-            mesh_node_features, mesh_edge_index, vessel_states, ego_idx
+            mesh_node_features, mesh_edge_index, vessel_states, ego_idx,
+            mesh_x_tensor=mesh_x_tensor, mesh_edge_tensor=mesh_edge_tensor, mesh_tree=mesh_tree,
         )
         seq.append(data)
         ego_idx_per_step.append(ego_idx)

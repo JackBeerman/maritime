@@ -23,6 +23,7 @@ overstate generalization. At the end of training, validation diagnostics
 are computed on held-out vessels the model never trained on.
 """
 import argparse
+from scipy.spatial import cKDTree
 import glob
 import os
 import numpy as np
@@ -98,11 +99,13 @@ def split_vessels_train_val(good_vessels, val_fraction, seed):
 
 
 def build_vessel_datasets(vessel_ids, ais_snapshots, mesh_node_features, mesh_edge_index,
-                            device, seq_len, future_len):
+                            device, seq_len, future_len,
+                            mesh_x_tensor=None, mesh_edge_tensor=None, mesh_tree=None):
     datasets = []
     for ego_mmsi in vessel_ids:
         snaps, ego_steps = build_snapshot_sequence(
-            ais_snapshots, mesh_node_features, mesh_edge_index, ego_mmsi
+            ais_snapshots, mesh_node_features, mesh_edge_index, ego_mmsi,
+            mesh_x_tensor=mesh_x_tensor, mesh_edge_tensor=mesh_edge_tensor, mesh_tree=mesh_tree,
         )
         snaps = [d.to(device) for d in snaps]
         ds = VesselSequenceDataset(snaps, ego_steps, seq_len=seq_len, future_len=future_len)
@@ -185,6 +188,10 @@ def main():
     ports = load_ports(args.ports_csv, bounds)
     pts, land_flags = sample_domain_points(bounds, land_polygons, ports)
     mesh_node_features, mesh_edge_index, _ = build_mesh(pts, land_flags, ports)
+    print("precomputing mesh tensors and KD-tree (reused across every vessel/timestep)...")
+    mesh_x_tensor = torch.as_tensor(mesh_node_features, dtype=torch.float, device='cpu')
+    mesh_edge_tensor = torch.as_tensor(mesh_edge_index, dtype=torch.long, device='cpu')
+    mesh_tree = cKDTree(mesh_node_features[:, :2])
     print(f"  mesh nodes: {mesh_node_features.shape[0]}, edges: {mesh_edge_index.shape[1]}")
 
     ais_paths = sorted(glob.glob(args.ais_glob))
@@ -214,10 +221,12 @@ def main():
     train_datasets = build_vessel_datasets(
         train_vessel_ids, ais_snapshots, mesh_node_features, mesh_edge_index,
         device, args.seq_len, args.future_len,
+        mesh_x_tensor=mesh_x_tensor, mesh_edge_tensor=mesh_edge_tensor, mesh_tree=mesh_tree,
     )
     val_datasets = build_vessel_datasets(
         val_vessel_ids, ais_snapshots, mesh_node_features, mesh_edge_index,
         device, args.seq_len, args.future_len,
+        mesh_x_tensor=mesh_x_tensor, mesh_edge_tensor=mesh_edge_tensor, mesh_tree=mesh_tree,
     )
     train_combined = ConcatDataset(train_datasets)
     val_combined = ConcatDataset(val_datasets) if val_datasets else None

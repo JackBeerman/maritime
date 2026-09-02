@@ -24,6 +24,9 @@ from ais_ingest import (
     build_world_snapshots, vessel_presence, VESSEL_FEATURE_DIM,
 )
 from graph_data import VesselSequenceDataset, share_mesh_on_device
+from batching import (
+    collate_windows, encode_windows_batched, batch_anchors_and_targets, dedup_ratio,
+)
 from model import GCVTP
 from losses import energy_score_loss
 
@@ -44,6 +47,15 @@ def parse_args():
     p.add_argument('--n-heads', type=int, default=4)
     p.add_argument('--n-layers', type=int, default=3)
     p.add_argument('--n-samples', type=int, default=16)
+    p.add_argument('--batch-size', type=int, default=32,
+                   help='windows per gradient step; at 1 the GPU is mostly idle on '
+                        'launch overhead, which is what made 100k-window epochs unusable')
+    p.add_argument('--gnn-chunk-size', type=int, default=32,
+                   help='graphs pushed through the GNN at once; bounds transient memory '
+                        'independently of batch-size (each graph replicates the mesh)')
+    p.add_argument('--window-stride', type=int, default=1,
+                   help='keep every Nth window per vessel; lets window count be a choice '
+                        'rather than a function of how much data was loaded')
     p.add_argument('--lr', type=float, default=1e-3)
     p.add_argument('--n-epochs', type=int, default=50)
     p.add_argument('--val-fraction', type=float, default=0.2)
@@ -74,13 +86,13 @@ def split_vessels_train_val(good_vessels, val_fraction, seed):
     return tr, va
 
 
-def build_datasets(vessel_ids, world, row_maps, seq_len, future_len):
+def build_datasets(vessel_ids, world, row_maps, seq_len, future_len, stride=1):
     out = []
     for mmsi in vessel_ids:
         widx, erow = vessel_presence(row_maps, mmsi)
         if len(widx) < seq_len + future_len:
             continue
-        ds = VesselSequenceDataset(world, widx, erow, seq_len, future_len)
+        ds = VesselSequenceDataset(world, widx, erow, seq_len, future_len, stride=stride)
         if len(ds) > 0:
             out.append(ds)
     return out
@@ -168,8 +180,10 @@ def main():
     world = share_mesh_on_device(world, device)
     print(f"  {len(world)} world snapshots on {device}")
 
-    train_ds = build_datasets(train_ids, world, row_maps, args.seq_len, args.future_len)
-    val_ds = build_datasets(val_ids, world, row_maps, args.seq_len, args.future_len)
+    train_ds = build_datasets(train_ids, world, row_maps, args.seq_len, args.future_len,
+                               stride=args.window_stride)
+    val_ds = build_datasets(val_ids, world, row_maps, args.seq_len, args.future_len,
+                             stride=args.window_stride)
     train_combined = ConcatDataset(train_ds)
     val_combined = ConcatDataset(val_ds) if val_ds else None
     print(f"  train windows: {len(train_combined)} across {len(train_ds)} vessels")
@@ -177,7 +191,8 @@ def main():
     if len(train_combined) == 0:
         raise RuntimeError("no training windows -- loosen vessel selection or check data")
 
-    loader = DataLoader(train_combined, batch_size=1, shuffle=True, collate_fn=lambda b: b[0])
+    loader = DataLoader(train_combined, batch_size=args.batch_size, shuffle=True,
+                         collate_fn=collate_windows)
 
     model = GCVTP(mesh_in=4, vessel_in=VESSEL_FEATURE_DIM, hidden=args.hidden,
                   future_len=args.future_len, n_heads=args.n_heads,
@@ -203,19 +218,21 @@ def main():
         norm_scale = torch.cat(deltas, dim=0).std().item()
     print(f"  norm_scale: {norm_scale:.5f}")
 
-    print("training...")
+    print(f"training (batch_size={args.batch_size}, gnn_chunk={args.gnn_chunk_size})...")
     for epoch in range(start_epoch, args.n_epochs):
         model.train()
-        total = 0.0
-        for ctx, ego_rows, target in loader:
-            anchor = ctx[-1]['vessel'].x[ego_rows[-1], :2]
-            tgt = (target - anchor.unsqueeze(0)) / norm_scale
-            samples = model(ctx, ego_rows, n_samples=args.n_samples, training=True)
-            loss = energy_score_loss(samples, tgt.unsqueeze(0))
+        total, n_win = 0.0, 0
+        for windows in loader:
+            context = encode_windows_batched(model, windows, args.gnn_chunk_size)
+            anchors, targets = batch_anchors_and_targets(windows)
+            tgt = (targets - anchors.unsqueeze(1)) / norm_scale
+            samples = model.head.sample(context, n_samples=args.n_samples)
+            loss = energy_score_loss(samples, tgt)
             opt.zero_grad(); loss.backward(); opt.step()
-            total += loss.item()
+            total += loss.item() * len(windows)
+            n_win += len(windows)
 
-        avg = total / len(train_combined)
+        avg = total / max(n_win, 1)
         print(f"epoch {epoch}: avg loss = {avg:.4f}", flush=True)
         torch.save({'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': opt.state_dict(),

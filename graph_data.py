@@ -113,14 +113,19 @@ class VesselSequenceDataset(torch.utils.data.Dataset):
     ego_rows is required because the shared snapshots carry no ego_mask.
     """
     def __init__(self, world_snapshots, present_world_idx, present_ego_row,
-                 seq_len=4, future_len=4):
+                 seq_len=4, future_len=4, stride=1):
         self.world = world_snapshots
         self.widx = np.asarray(present_world_idx, dtype=np.int64)
         self.erow = np.asarray(present_ego_row, dtype=np.int64)
         self.seq_len = seq_len
         self.future_len = future_len
         n = len(self.widx)
-        self.valid_starts = list(range(n - seq_len - future_len + 1))
+        # stride>1 keeps every Nth window. Consecutive windows overlap in
+        # seq_len-1 of their timesteps, so they are highly redundant --
+        # striding trades a little data for a lot of epoch time, and makes
+        # window count a deliberate choice rather than a side effect of how
+        # many days were loaded.
+        self.valid_starts = list(range(0, n - seq_len - future_len + 1, max(1, stride)))
 
     def __len__(self):
         return len(self.valid_starts)

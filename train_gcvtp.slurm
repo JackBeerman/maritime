@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:a100:1
 #SBATCH -t 12:00:00
 #SBATCH -c 4
-#SBATCH --mem=192G
+#SBATCH --mem=350G
 
 mkdir -p logs checkpoints
 cd ~/maritime

@@ -123,13 +123,19 @@ class GCVTP(nn.Module):
         samples = self.head.sample(context, n_samples=n_samples)
         return samples
 
-    def rollout_step(self, snapshot, cache: KVCache, position: int):
+    def rollout_step(self, snapshot, cache: KVCache, position: int, ego_idx=None):
         """
         Incremental inference: one new timestep's snapshot -> GNN -> cached
-        transformer step. Returns updated summary embedding for that step.
+        transformer step.
+
+        ego_idx must be supplied because shared world snapshots carry no
+        ego_mask -- the same graph serves every ego vessel, so which row
+        is 'us' is caller state, not a property of the graph. Falls back
+        to ego_mask if present, for compatibility with older snapshots.
         """
         v_embed = self.gnn(snapshot)
-        ego_i = snapshot['vessel'].ego_mask.nonzero()[0].item()
-        new_embed = v_embed[ego_i].view(1, 1, self.hidden)
+        if ego_idx is None:
+            ego_idx = snapshot['vessel'].ego_mask.nonzero()[0].item()
+        new_embed = v_embed[ego_idx].view(1, 1, self.hidden)
         out = self.temporal.step(new_embed, cache, position=position)
         return out[:, -1, :]

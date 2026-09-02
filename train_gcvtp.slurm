@@ -4,7 +4,7 @@
 #SBATCH -o logs/maritime_train_%j.out
 #SBATCH -e logs/maritime_train_%j.err
 #SBATCH -p gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu
 #SBATCH -t 12:00:00
 #SBATCH -c 4
 #SBATCH --mem=192G
@@ -20,9 +20,10 @@ python3 train.py \
     --n-underway 300 \
     --n-stationary 300 \
     --hidden 128 \
+    --seq-len 12 \
     --n-layers 4 \
     --n-epochs 100 \
-    --checkpoint-path checkpoints/checkpoint_large.pt \
+    --checkpoint-path checkpoints/checkpoint_12.pt \
     --resume
 
 echo "Job finished with exit code $?"

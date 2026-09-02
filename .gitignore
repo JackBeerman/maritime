@@ -30,3 +30,5 @@ logs/*.err
 .DS_Store
 venv
 data/
+venv
+data/

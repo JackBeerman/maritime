@@ -2,366 +2,271 @@
 
 Repo: https://github.com/JackBeerman/maritime
 Environment: UVA Rivanna HPC, account `sds_baek_energetic`, user `jtb3sud`
-Code lives at `~/maritime` (home dir); bulk AIS data lives at `/scratch/jtb3sud/maritime/ais/`
+
+**Two git worktrees, one repo:**
+- `~/maritime` — always on `main` (fixed 15-minute interval sampling)
+- `~/maritime-irregular` — always on `irregular-sampling` (raw irregular pings)
+
+Worktrees rather than `git checkout` because SLURM jobs read code from
+disk at launch; switching branches in a shared directory can hand a
+queued job the wrong branch's files. Each worktree has its own files but
+shares history and remote. Bulk AIS data lives at
+`/scratch/jtb3sud/maritime/ais/` (12 days, 2026-08-18 .. 2026-08-29,
+~236M records total); `venv` and `data/` are symlinked into the
+irregular worktree and gitignored.
 
 ## What this project is
 
 Predicts a single "ego" vessel's future positions from its recent AIS
-track, the traffic around it, and the surrounding coastline/port
-geometry — outputting a **distribution of plausible future paths**
-(via sampling), not a single point estimate.
+track, surrounding traffic, and coastline/port geometry — outputting a
+**distribution of plausible futures** via sampling, not a point estimate.
 
-The architecture and key design choices are deliberately modeled on
-DeepMind's weather forecasting lineage:
-- **GraphCast**: mesh + graph-neural-network spatial structure, and
-  predicting a **residual/delta** from the last known state rather than
-  an absolute value (this was the single most impactful fix made so
-  far — see "Key bugs found" below).
-- **WeatherNext's FGN (Functional Generative Network)**: a sampling
-  head that decodes many independent trajectory samples per forward
-  pass instead of one deterministic output, trained with an energy
-  score loss.
+Architecture and key decisions follow DeepMind's weather-forecasting
+lineage:
+- **GraphCast** — mesh + GNN spatial structure, and predicting a
+  **residual** from the last known state rather than an absolute value.
+- **WeatherNext FGN** — a sampling head producing many trajectories per
+  forward pass, trained with an energy score loss.
 
-Domain: Danish waters (`DMA_BOUNDS` in `coastline.py`), using the
-Danish Maritime Authority's free public AIS archive
-(`http://aisdata.ais.dk/aisdk-YYYY-MM-DD.zip`). An earlier South China
-Sea configuration was explored and abandoned early in the rebuild; no
-trace of it remains in the current codebase.
+Domain: Danish waters, using the Danish Maritime Authority's public AIS
+archive (`http://aisdata.ais.dk/aisdk-YYYY-MM-DD.zip`).
 
-**Note on the name**: The repo/model class is still called `GCVTP`
-("Goal-Conditioned Vessel Trajectory Predictor") from an earlier,
-pre-rebuild design. Goal-conditioning was fully removed from the code
-during this rebuild (see below) — the name is legacy and doesn't
-reflect current functionality. Consider renaming the repo/class if it
-becomes confusing.
+**Naming note:** the model class is still `GCVTP` ("Goal-Conditioned
+Vessel Trajectory Predictor") from a pre-rebuild design.
+Goal-conditioning was fully removed; the name is legacy.
 
-## Current status (as of last session)
+## Current status
 
-1. Full pipeline validated end-to-end on real Danish AIS data, on
-   Rivanna, via both interactive notebook and SLURM batch jobs.
-2. Completed one full 50-epoch SLURM training run (before the latest
-   round of fixes below) on 190 train / 47 val vessels (one day of
-   data, 2026-08-25), with **held-out validation** (not in-sample):
-   - Spread-vs-actual-displacement correlation: **0.68**
-   - On moving vessels (>1km): beat a trivial "assume no movement"
-     baseline on **80%** of windows (6.98km vs 11.56km mean error)
-   - Loss curve had **plateaued** by ~epoch 20-25 (0.745-0.760 band,
-     no further improvement through epoch 49) — more epochs on this
-     single day of data were not helping further.
-3. **Just applied three more fixes (untested at full scale — this is
-   the immediate next step)**: vessel-type one-hot encoding, COG
-   sin/cos encoding, and input feature normalization (see below).
-   Verified correct via unit tests and a full small-scale local
-   `train.py` run, but **not yet run at full scale on Rivanna**.
-4. This change **breaks checkpoint compatibility** (vessel feature
-   width changed 8 -> 12) — any old `checkpoints/checkpoint.pt` must
-   be deleted/renamed before the next run; `--resume` will crash
-   trying to load an incompatible shape into the new model otherwise.
+### `main` — fixed 15-minute intervals
 
-## Immediate next steps (in likely priority order)
+Best completed run (1 day, 190 train / 47 val vessels, 50 epochs,
+held-out validation):
+- spread-vs-displacement correlation **0.719**
+- beat "assume no movement" baseline on **78.6%** of moving windows
+  (6.97 km vs 11.56 km mean error)
 
-1. **Delete/rename the old checkpoint**, then run the updated
-   `train.py` on Rivanna via SLURM (smoke test first at small scale,
-   e.g. `--n-underway 30 --n-stationary 30 --n-epochs 5`, then the
-   full run) to confirm the new features/normalization actually help
-   held-out validation numbers, not just that the code runs.
-2. **Get more days of AIS data.** Training has so far only ever used
-   a single day (`aisdk-2026-08-25.csv`). Given the loss plateau
-   observed with more epochs on one day, additional days (different
-   traffic patterns, days of week) are likely the biggest remaining
-   lever for real improvement — more so than further epoch count or
-   architecture tweaks on the same single day.
-   Download via: `wget http://aisdata.ais.dk/aisdk-YYYY-MM-DD.zip`
-   into `/scratch/jtb3sud/maritime/ais/`, then unzip. `train.py`'s
-   `--ais-glob` picks up all matching files automatically.
-3. Once more data is in the mix, consider increasing model capacity
-   (`--hidden`, `--n-layers`) — current `hidden=64, n_layers=3` is
-   fairly small, and the loss plateau on one day's data may partly
-   reflect limited data more than limited capacity, so scale data
-   before scaling the model to avoid overfitting.
-4. **Known limitation, not yet addressed**: vessel-to-mesh and
-   vessel-to-vessel k-NN graph construction
-   (`assign_vessels_to_mesh`, `knn_graph_manual` in `graph_data.py`)
-   uses raw-degree Euclidean distance, not true haversine distance —
-   at higher latitudes a degree of longitude covers less real distance
-   than a degree of latitude, so neighbor-finding is subtly distorted.
-   Not fixed yet because it means touching well-tested graph-topology
-   code; worth revisiting once more data/capacity changes are settled.
-   Denmark's narrow latitude band (53.5-58.5N) limits how much this
-   actually matters in practice.
-5. Longer-term / not yet started: multi-vessel joint prediction
-   (currently strictly single-ego-vessel-at-a-time, conditioned on
-   others' past/current state only — this was a deliberate early
-   scoping decision, see "Design decisions" below).
+**A 12-day run is in progress** (480 train / 120 val vessels, 113,785
+train windows, `--seq-len 12`, `hidden 128`). Confirms the dedup fix
+works — 1,152 shared world snapshots on GPU, no OOM. But it runs at
+**~2 hours/epoch**, so it will hit the 12-hour wall around epoch 6.
+`--resume` works, so nothing is lost; results at the wall should still
+be informative (~6 epochs × 113k windows is roughly 75 epochs' worth of
+gradient updates at the previous data scale).
+
+### `irregular-sampling` — raw irregular pings
+
+Built and unit-tested; **no completed training run yet.** A smoke test
+(40 vessels, 18,246 windows) trained cleanly (loss 1.21 → 0.61 in one
+epoch) but timed out. A larger run is in progress and has not completed
+an epoch — almost certainly just slow (~7 h/epoch projected at 150+150
+vessels), not hung.
+
+## THE BINDING CONSTRAINT: `batch_size=1`
+
+Both branches now produce 100k+ training windows and **neither can
+complete epochs at a usable rate.** Every optimization so far
+(KD-tree neighbour search, world-snapshot dedup, mesh sharing) addressed
+*memory* and *setup* cost; none touched per-step training throughput.
+
+Each step is one forward/backward over a full GNN (~5,600 mesh nodes +
+thousands of vessels) for a single window, so the A100 is largely idle
+on Python and graph overhead.
+
+**Next work, in priority order:**
+
+1. **Batching.** PyG supports batching heterogeneous graphs of variable
+   size; plausibly 5-10x throughput. Invasive — touches the training
+   loop, collate function, and ego-vessel indexing, which has produced
+   two real bugs already — so it should be its own isolated change with
+   its own tests. This is now what blocks using the collected data.
+2. **Window subsampling.** A stride knob in `VesselSequenceDataset`
+   so window count is something you control rather than a function of
+   data volume. ~30 minutes of work; gets both branches running today at
+   reduced data.
+3. **Epoch-count sanity.** With 12x the data, 50 epochs was never the
+   right target — gradient updates matter, not epochs. 10-15 epochs at
+   the new scale ≈ 100-150 at the old.
+4. **CPU RAM on multi-day loads.** Concatenating 12 daily CSVs into one
+   DataFrame (~236M records) OOM'd a 64 GB job. Structural fix: load and
+   resample each day separately, keep only the (much smaller) resampled
+   snapshots, free each DataFrame before the next. Would cut peak CPU
+   memory ~12x. Currently worked around with `--mem`.
 
 ## Architecture
 
-1. **Spatial mesh** (`mesh.py`) — a triangulated graph over the
-   maritime domain, denser near coastlines and ports (built via
-   `sample_domain_points` + Delaunay triangulation in `build_mesh`).
-   Built once from Natural Earth 10m coastline polygons + a hand-built
-   Danish ports CSV. Node features: `[lon, lat, is_land, is_port]`
-   (raw real-world coordinates).
+1. **Spatial mesh** (`mesh.py`) — Delaunay triangulation over the
+   domain, denser near coastlines and ports. Built once from Natural
+   Earth coastline + Danish ports CSV. Node features
+   `[lon, lat, is_land, is_port]` (raw coordinates).
+2. **Graph per timestep** (`graph_data.py`) — mesh nodes + vessel nodes;
+   edges `mesh-to-mesh` (triangulation), `vessel-near-mesh` (3 nearest),
+   `vessel-near-vessel` (6 nearest). KD-tree neighbour search.
+3. **GNN encoder** (`model.py: MeshVesselGNN`) — two `SAGEConv`
+   heterogeneous layers, mean aggregation. Normalizes lon/lat (to domain
+   bounds) and SOG internally; stored tensors keep raw values because
+   k-NN, targets and plotting all read columns 0-1 as real coordinates.
+4. **Cached causal transformer** (`cached_attention.py`) — full-window
+   pass for training, incremental KV-cached `.step()` for streaming
+   rollout. Verified exact against full recompute (~1e-6 CPU).
+5. **FGN sampling head** — context + noise → many trajectory samples.
+   Output is a **normalized residual**, not an absolute coordinate.
 
-2. **Heterogeneous graph per timestep** (`graph_data.py`) — for each
-   AIS snapshot, builds a `HeteroData` object with `mesh` nodes (fixed,
-   from step 1) and `vessel` nodes (every vessel present at that
-   timestamp). Edge types: `mesh-to-mesh` (triangulation),
-   `vessel-near-mesh` (each vessel to its 3 nearest mesh nodes),
-   `vessel-near-vessel` (k=6 nearest other vessels). One vessel per
-   snapshot is flagged `ego_mask=True`.
+### Feature layouts (differ by branch)
 
-   **Vessel feature layout (12 dims, as of the latest fix):**
-   `[lon, lat, sog, cog_sin, cog_cos, *type_onehot(7)]` — lon/lat/sog
-   stay as raw real-world values in storage (normalized only inside
-   the model at consumption time — see point 3); COG is sin/cos
-   encoded rather than a raw 0-359 scalar (raw would falsely tell the
-   network that 359 deg and 1 deg are nearly maximally different, when
-   they're 2 deg apart); vessel type is one-hot encoded rather than a
-   raw ordinal-looking integer.
+`main` (12 dims):
+`[lon, lat, sog, cog_sin, cog_cos, *type_onehot(7)]`
 
-3. **GNN encoder** (`model.py: MeshVesselGNN`) — two layers of
-   heterogeneous graph convolution (`SAGEConv`, mean aggregation)
-   across all four edge types. **Normalizes lon/lat (centered/scaled
-   to domain bounds) and SOG (scaled by a typical max speed) internally
-   right before the linear projection** — this only affects what the
-   network sees, not the stored raw coordinates, since k-NN
-   construction, target/displacement computation, and plotting
-   elsewhere in the pipeline all depend on reading those columns as
-   real coordinates.
+`irregular` (14 dims):
+`[lon, lat, sog, cog_sin, cog_cos, dt_norm, staleness_norm, *type_onehot(7)]`
 
-4. **Cached causal transformer** (`cached_attention.py`) — attends
-   across the context window's timesteps (default 4 x 15-min steps =
-   1 hour of lookback). Two interchangeable modes, verified
-   mathematically exact matches of each other (checked to ~1e-6 on
-   CPU; GPU shows expected CuBLAS/scatter nondeterminism on the order
-   of 1e-3, not a bug — see "Key bugs found" for the full story):
-   - `.forward()` — full-window pass (training)
-   - `.step()` — incremental, KV-cached pass (efficient multi-step
-     rollout at inference, avoids recomputing attention over the whole
-     history every step)
+COG is sin/cos encoded (a raw 0-359 scalar implies 359° and 1° are
+nearly opposite); vessel type is one-hot (a raw id implies false
+ordering between categories).
 
-5. **FGN sampling head** (`model.py: FGNDecoderHead`) — takes the
-   context summary embedding, concatenates with random noise, decodes
-   to a batch of independent trajectory samples (default 16 during
-   training, more at inference). **Raw output is a normalized
-   residual displacement (delta) from the last known position, NOT an
-   absolute coordinate** — see "Key bugs found" for why this matters
-   enormously. To recover a real position:
-   `sample * norm_scale + last_known_position`.
-   `norm_scale` is computed once from the training set's actual delta
-   standard deviation and saved in the model checkpoint.
+### How the branches differ
 
-**Note on removed goal-conditioning**: An earlier `GoalEncoder` module
-(accepting an optional known destination) was part of the original
-pre-rebuild design but was never exercised (always fed `NaN`) and has
-been **fully removed** from `model.py`/`train.py`/`inference.py` as of
-this session. The model's forward signature no longer takes a
-`goal_xy` argument.
+| | `main` | `irregular-sampling` |
+|---|---|---|
+| Time handling | resample to 15-min bins, interpolate single gaps | raw pings, no interpolation |
+| Snapshot | one per timestamp, **shared by all ego vessels** | ego-anchored; neighbours = last report before that instant + staleness |
+| Positional encoding | learned, indexed by integer step | sinusoidal over **real elapsed seconds** |
+| Head conditioning | context + noise | context + noise + **target Δt** |
+| Target | position at fixed +15/30/45/60 min | actual observed pings at true elapsed times |
+| Normalization | displacement / global std | **velocity** (displacement ÷ Δt) / global std |
+| Dedup possible? | yes (world state is shared) | no (snapshots are per-ego-vessel); only mesh is shareable |
 
-## Data pipeline, raw file to training example
+Motivation for the irregular branch: measured per-vessel median ping
+intervals span **10s (p10) to 284s (p90)** — a 28x range. Fixed binning
+hides this and assumes uniform spacing, which is false in live
+operation.
 
-1. **Raw AIS CSV** (`aisdk-YYYY-MM-DD.csv`, ~2GB/day, ~29M rows) —
-   one row per AIS ping: MMSI, timestamp, lat/lon, SOG, COG, ship
-   type, etc. Some files have a `#`-prefixed first header column
-   (handled).
+## Key findings from diagnostics
 
-2. **Cleaning** (`ais_ingest.load_dma_ais_csv`) — strips header
-   prefix if present, drops `Base Station` rows (fixed shore
-   transmitters, not vessels), renames columns to internal schema,
-   parses day-first timestamps.
+**Failure mode is turning, decisively.** Comparing worst-20% to best-20%
+of held-out windows by error ratio:
 
-3. **Resampling** (`ais_ingest.resample_to_snapshots`) — bins each
-   vessel's pings into fixed 15-min windows, linearly interpolating
-   across single missed intervals. **Drops a timestep entirely if ANY
-   of lon/lat/sog/cog is still missing after interpolation** (see "Key
-   bugs found" — checking only `lon` here was a real, silent-NaN bug).
+| factor | worst 20% | best 20% | ratio |
+|---|---|---|---|
+| turn angle (deg) | 40.87 | 10.09 | **4.05** |
+| speed variability | 0.01 | 0.00 | 3.12 |
+| distance to port (km) | 83.65 | 87.04 | 0.96 |
+| vessels in snapshot | 3362 | 3228 | 1.04 |
+| SOG (knots) | 5.73 | 7.53 | 0.76 |
 
-4. **Vessel selection** (`ais_ingest.select_ego_vessels_stratified`)
-   — filters to vessels with enough pings and a sane ping rate (not
-   an AIS repeater/buoy), then **deliberately balances underway and
-   stationary/anchored vessels** (roughly 50/50 by default) as ego
-   training targets. See "Design decisions" for why this matters.
+Nothing but turning (and speed variability, likely correlated)
+distinguishes failures. Not congestion, not port proximity. Prompted the
+move to `--seq-len 12` (3 h lookback) so the model can see turn *rate*,
+not just current heading. **AIS Rate-of-Turn (ROT) is still dropped
+during ingest** — adding it is the obvious untried next feature.
 
-5. **Per-vessel windowing** (`graph_data.VesselSequenceDataset`) —
-   slides a window over one vessel's snapshot sequence: 4 timesteps
-   context (1hr lookback) -> next 4 timesteps target (1hr forecast).
+**Error grows linearly with horizon**, not exponentially:
++15 min 1.59 km, +30 min 3.43 km, +45 min 5.43 km, +60 min 7.58 km
+(~1.9 km per step). Longer forecasts degrade predictably.
 
-6. **Train/val split** (`train.py: split_vessels_train_val`) — splits
-   by VESSEL (not window), stratified by regime, default 80/20. This
-   matters because windows from the same vessel are highly correlated
-   (overlapping, similar behavior) — a window-level split would leak
-   information and overstate generalization.
+**Longer windows cost less data than expected**: 2 h → 4 h total span
+drops windows only 22% (1177 → 919), though vessel count falls faster
+(32 → 22), which matters more for generalization.
 
-## Key bugs found and fixed (chronological — useful context for why
-things are built the way they are)
+## Key bugs found and fixed
 
-1. **KV cache concatenation bug** — cache was concatenating new
-   keys/values along the attention-heads dimension instead of the
-   sequence dimension. Silent corruption, not a crash. Found via
-   direct numerical comparison against full recomputation.
+1. **KV cache concatenation** — concatenated along the heads dimension
+   instead of sequence. Silent corruption, not a crash.
+2. **`pyg-lib` dependency** — PyG's `knn_graph()` needs an optional
+   package with version-pinned wheels. Replaced with in-repo KD-tree.
+3. **NaN from blank SOG/COG** — real AIS legitimately has these; the
+   resampler only checked `lon`. Now checks all of lon/lat/sog/cog.
+4. **Absolute-coordinate targets (the big one)** — loss was dominated by
+   a task-irrelevant ~55°N offset. Switched to residual displacement,
+   matching GraphCast. Correlation ~0 → 0.19.
+5. **Missing output normalization** — targets normalized to unit
+   variance took correlation 0.19 → **0.68**. Single biggest lever in
+   the project.
+6. **`HeteroData.to(device)` mutates in place** — combined with sliding
+   windows sharing snapshot objects, calling it per-batch silently
+   corrupted other windows mid-epoch. Fixed by moving to device once at
+   dataset-build time.
+7. **`inference.py` not updated for delta targets** — treated raw output
+   as absolute position during rollout.
+8. **World-snapshot duplication → CUDA OOM** — a graph was built per
+   *(ego vessel, timestamp)*, but the world at a timestamp is identical
+   regardless of which vessel you're forecasting. Measured **856x**
+   redundancy (3.6 GB → 4.3 MB on a 300-vessel benchmark); at full scale
+   178-710 GB vs 1.2 GB needed. Fixed on `main` by building one shared
+   graph per timestamp with the ego row index carried alongside; the
+   irregular branch can only share the mesh (~32%), since its snapshots
+   are genuinely per-ego-vessel.
+9. **CPU RAM OOM on 12-day load** — unrelated to the GPU fix; see next
+   steps item 4.
+10. **GPU non-determinism (not a bug)** — a ~2% divergence in a
+    cache-vs-recompute check is ordinary CUDA scatter nondeterminism,
+    reproducible with two plain GNN calls on identical input.
 
-2. **`pyg-lib` dependency risk** — PyTorch Geometric's built-in
-   `knn_graph()` needs the optional `pyg-lib` package, which has
-   version-pinned wheels not guaranteed to match any given
-   torch/CUDA build. Replaced with a manual `torch.cdist`-based k-NN
-   (`knn_graph_manual` in `graph_data.py`) to remove the dependency
-   entirely.
+## Design decisions and reasoning
 
-3. **NaN-from-blank-SOG/COG bug** — real AIS data legitimately has
-   blank SOG/COG on some pings even when position is present.
-   `resample_to_snapshots` originally only checked `lon` for NaN
-   before accepting a timestep; fixed to check all of
-   lon/lat/sog/cog.
+- **Stratified (not exclusive) vessel sampling.** Stationary vessels are
+  sampled, not excluded — a deployed predictor must handle "stays put."
+  The original failure was an *unbalanced* distribution plus a decoder
+  that couldn't express "it depends"; both are addressed.
+- **Single ego vessel, conditioned on others' past/current state only.**
+  Conditioning on neighbours' *future* state would be an oracle leak.
+  Joint multi-vessel prediction is a legitimate later step.
+- **Train/val split by vessel, not window.** Windows from one vessel are
+  highly correlated; a window-level split would leak and overstate
+  generalization.
+- **Always segment AIS statistics by movement regime.** A naive
+  full-population displacement check (mixing stationary and underway)
+  gave a misleading near-zero median that would have led to a wrong
+  interval choice.
 
-4. **Absolute-coordinate targets (the big one)** — the model
-   originally predicted absolute lon/lat directly. This meant the
-   loss was dominated by a huge, task-irrelevant offset (~55degN),
-   which swamped the much smaller, more important signal of how
-   confident to be. Fixed by predicting a **residual displacement
-   from the last known position** instead — directly matching
-   GraphCast's documented approach (confirmed via research, not
-   assumed). This alone took spread-vs-displacement correlation from
-   ~0 (uncorrelated) to ~0.19 on real data.
+## Environment
 
-5. **Missing output normalization** — even with delta targets,
-   correlation was weak (0.19) on data spanning a wide range of
-   vessel speeds, because the network had to learn "typical speed
-   scale" and "confidence" as one entangled thing. Adding
-   **unit-variance normalization** of the delta target (dividing by
-   the training set's empirical std, matching GraphCast's documented
-   per-variable normalization) took correlation to 0.68 on real
-   held-out data (and 0.937 on an idealized synthetic test). This was
-   the single biggest lever found in this project.
-
-6. **HeteroData.to(device) mutates in place** — PyTorch Geometric's
-   `.to(device)` returns the same object with tensors reassigned in
-   place, not a new copy. Combined with `VesselSequenceDataset`'s
-   sliding windows sharing the same underlying snapshot objects
-   across overlapping windows, calling `.to(device)` inside the
-   per-batch training loop silently corrupted other windows'
-   snapshots mid-epoch (mixed-CPU/CUDA tensor crashes, order-dependent
-   on shuffle). Fixed by moving each vessel's full snapshot list to
-   device ONCE at dataset-build time, never again during training.
-
-7. **`inference.py` never updated for the delta-target change** —
-   caught during this session's cleanup: the multi-step rollout script
-   still treated raw model output as an absolute position and fed it
-   back into the next snapshot uncorrected. Fixed to unnormalize
-   (`* norm_scale`) and add back the last known position at every
-   step.
-
-8. **GPU non-determinism (not a bug, but worth knowing)** — a ~2%
-   relative divergence in a "cache vs. full-recompute" correctness
-   check turned out to be ordinary CUDA/CuBLAS scatter-reduction
-   nondeterminism (confirmed by showing the same divergence exists
-   calling the plain GNN twice on identical input, no caching
-   involved). The underlying cache logic itself is exact (verified on
-   CPU to ~1e-6 at real data scale). Not something to "fix" — just
-   don't expect bit-identical repeated runs on GPU.
-
-## Design decisions worth knowing the reasoning behind
-
-- **Stratified (not exclusive) vessel sampling by movement regime.**
-  Early instinct was to exclude stationary/anchored vessels from
-  training as "boring" targets. Corrected: a real deployed predictor
-  needs to correctly predict "stays put" as a valid outcome too —
-  excluding stationary vessels would leave the model unable to handle
-  that case at inference. The ORIGINAL pre-rebuild GC-VTP's failure
-  mode wasn't "trained on stationary vessels" per se, it was an
-  UNBALANCED distribution (mostly stationary) combined with a decoder
-  that couldn't express "it depends" — both are now addressed (energy
-  score loss + balanced sampling).
-- **Single ego vessel at a time, conditioned on others' past/current
-  state only** (not their future state, and not joint multi-vessel
-  prediction). Deliberate scoping decision: conditioning on others'
-  FUTURE state would be an oracle leak (undeployable, since real
-  inference never has others' future positions); joint multi-vessel
-  prediction is a reasonable phase-two extension but adds meaningful
-  architectural complexity that wasn't worth taking on before the
-  single-vessel case was validated.
-- **15-minute resampling interval** — chosen after checking real
-  displacement-per-step against real mesh edge spacing. For
-  genuinely underway vessels, median displacement (~2.5km/15min) is
-  reasonably close to open-water mesh spacing (~6km) and well inside
-  near-port mesh spacing (~4.5km) — good enough alignment, not
-  revisited further.
-- **Interval choice deliberately decoupled from the earlier finding**
-  that a naive full-population displacement check (mixing stationary
-  and underway vessels) gave a misleading near-zero median — always
-  segment by SOG/movement regime before drawing conclusions from
-  aggregate AIS statistics.
-
-## Environment / how to run things
-
-**Local dev/testing venv** (not a container — Apptainer was set up but
-deliberately not used for the real runs, since the Jupyter-validated
-`pip install --user` / venv environment was the only one actually
-proven to work):
 ```bash
 cd ~/maritime
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
+Validated: torch 2.9.1+cu128, torch_geometric 2.8.0.post1,
+geopandas 1.1.4, shapely 2.1.2. Runs on A100 and RTX A6000. No
+container — the venv is the tested environment.
 
-**Training** (interactive or via SLURM):
+**Rivanna access:** `rivanna.hpc.virginia.edu` is dead; use
+`login.hpc.virginia.edu`. Off-campus SSH needs UVA VPN. Open OnDemand
+(`https://ood.hpc.virginia.edu`) works from anywhere without VPN.
+
+**Storage:** code in `~/maritime` (200 GB quota, snapshotted); AIS in
+`/scratch/jtb3sud/maritime/ais/` (10 TB, no backup, 90-day inactivity
+purge).
+
+## Running
+
 ```bash
-python3 train.py \
-    --ais-glob "/scratch/jtb3sud/maritime/ais/aisdk-*.csv" \
-    --land-shp data/ne_10m_land/ne_10m_land.shp \
-    --ports-csv data/ports_denmark.csv \
-    --n-underway 150 --n-stationary 150 \
-    --n-epochs 50 \
-    --checkpoint-path checkpoints/checkpoint.pt \
-    --resume
+cd ~/maritime           && sbatch train_gcvtp.slurm       # fixed-interval
+cd ~/maritime-irregular && sbatch train_irregular.slurm    # irregular
 ```
+Always submit from the matching worktree. Both scripts use `--resume`,
+which is safe whether or not a checkpoint exists.
 
-**SLURM** (`train_gcvtp.slurm` in repo): account `sds_baek_energetic`,
-partition `gpu`, tested working on both A100 and RTX A6000 (no need to
-pin to a specific GPU type).
+Irregular-only knobs: `--min-ping-gap-sec` (thins dense pings; **this
+sets your effective forecast horizon** and is the most important one to
+tune), `--staleness-cutoff-sec`, `--neighbor-radius-deg`,
+`--max-neighbors`, `--max-window-span-sec`.
 
-**Rivanna access notes**: `rivanna.hpc.virginia.edu` is a dead/removed
-hostname — use `login.hpc.virginia.edu`. Off-campus SSH requires UVA's
-VPN (Cisco AnyConnect, install via the UVA ITS service portal). Open
-OnDemand (`https://ood.hpc.virginia.edu`) works from anywhere without
-VPN and provides a browser-based shell — useful fallback.
+## Open questions
 
-**Storage**: code in `~/maritime` (home, 200GB quota, weekly
-snapshots). Bulk AIS data in `/scratch/jtb3sud/maritime/ais/`
-(10TB quota, no backups, 90-day inactivity purge — fine since active
-training counts as access).
-
-## Repo structure
-
-```
-mesh.py                -- spatial mesh construction (Delaunay triangulation)
-coastline.py            -- coastline/port loading, DMA_BOUNDS domain bounds
-ais_ingest.py            -- AIS parsing, resampling, vessel selection, feature encoding
-graph_data.py            -- HeteroData graph construction, windowed dataset
-cached_attention.py      -- KV-cached causal transformer
-model.py                 -- GNN + transformer + FGN head, full GCVTP model
-losses.py                -- energy score loss
-train.py                 -- standalone training script (SLURM-ready, train/val split)
-inference.py             -- multi-step rollout / forecasting (delta-aware)
-train_gcvtp.slurm        -- SLURM batch script
-test_pipeline_denmark.ipynb  -- interactive exploration notebook
-requirements.txt
-.gitignore
-README.md
-```
-
-## What NOT to re-litigate (settled, tested questions)
-
-- KV-cache correctness: exact, verified multiple times at multiple
-  scales. GPU numerical noise in comparisons is expected CUDA
-  behavior, not a bug.
-- Delta-target + normalization approach: strongly validated on both
-  synthetic and real held-out data, directly matches documented
-  GraphCast practice. Don't revert to absolute-coordinate targets.
-- Stratified vessel sampling: deliberate, reasoned design choice, not
-  an oversight — don't "simplify" back to excluding stationary
-  vessels.
-- Single-vessel-at-a-time scope: deliberate, not a limitation to
-  rush to fix — joint prediction is a real but separate future step.
+- **The branches aren't comparable yet.** `main` predicts a fixed 60 min
+  ahead; `irregular` predicts whatever the pings give (median ~14 min at
+  60 s thinning). A fair test needs matched horizons or evaluation at
+  common query times.
+- **`inference.py` not ported to the irregular branch.** The
+  Δt-conditioned head emits a whole trajectory in one pass, so
+  autoregressive rollout may not be needed at all — decide before
+  porting.
+- **Notebook cells are stale on `main`** — `VesselSequenceDataset` now
+  returns `(ctx, ego_rows, target)` (three values), and shared snapshots
+  carry no `ego_mask`. The prediction plots, GIF animation, and
+  failure-analysis cells all need updating to use `ego_rows`.
+- **Haversine vs Euclidean neighbours.** k-NN uses raw-degree Euclidean
+  distance; at higher latitudes a degree of longitude is shorter than a
+  degree of latitude. Denmark's narrow band (53.5-58.5°N) limits the
+  impact. Deferred as it means touching well-tested topology code.

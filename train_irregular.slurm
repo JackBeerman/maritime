@@ -10,7 +10,7 @@
 #SBATCH --mem=192G
 
 mkdir -p logs checkpoints
-cd ~/maritime
+cd ~/maritime-irregular
 source venv/bin/activate
 
 python3 train_irregular.py \

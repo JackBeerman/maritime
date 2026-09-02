@@ -40,7 +40,7 @@ from mesh import sample_domain_points, build_mesh
 from irregular_ingest import (
     load_dma_ais_csv, build_ego_anchored_snapshots, select_ego_vessels_stratified,
 )
-from graph_data import IrregularVesselDataset
+from graph_data import IrregularVesselDataset, share_mesh_on_device
 from model import IrregularVTP
 from losses import energy_score_loss
 
@@ -112,7 +112,7 @@ def build_datasets(vessel_ids, ais_df, mesh_node_features, mesh_edge_index, devi
         )
         if len(snaps) < args.seq_len + args.future_len:
             continue
-        snaps = [d.to(device) for d in snaps]
+        snaps = share_mesh_on_device(snaps, device)
         ds = IrregularVesselDataset(snaps, ego_idx, times, positions,
                                      seq_len=args.seq_len, future_len=args.future_len,
                                      max_window_span_sec=args.max_window_span_sec)

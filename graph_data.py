@@ -79,6 +79,34 @@ def build_hetero_snapshot(mesh_node_features, mesh_edge_index, vessel_states,
     return data
 
 
+def share_mesh_on_device(snapshots, device):
+    """
+    Moves ego-anchored snapshots to `device` keeping ONE shared mesh copy.
+
+    Unlike the fixed-interval branch, world-state deduplication does NOT
+    apply here: snapshots are anchored to each ego vessel's own ping
+    times, with neighbours resolved at those exact instants, so two
+    vessels essentially never share a snapshot. The mesh, however, is
+    identical everywhere -- and HeteroData.to() would otherwise allocate
+    a private copy per snapshot (~348 KB each, tens of GB across a large
+    run). Moving it once and reusing the same device tensor removes that
+    duplication (~32% of per-snapshot memory).
+    """
+    if not snapshots:
+        return snapshots
+    mesh_x = snapshots[0]['mesh'].x.to(device)
+    mesh_ei = snapshots[0]['mesh', 'to', 'mesh'].edge_index.to(device)
+    for d in snapshots:
+        d['vessel'].x = d['vessel'].x.to(device)
+        d['vessel'].ego_mask = d['vessel'].ego_mask.to(device)
+        for et in [('vessel', 'near', 'mesh'), ('mesh', 'rev_near', 'vessel'),
+                    ('vessel', 'near', 'vessel')]:
+            d[et].edge_index = d[et].edge_index.to(device)
+        d['mesh'].x = mesh_x
+        d['mesh', 'to', 'mesh'].edge_index = mesh_ei
+    return snapshots
+
+
 class IrregularVesselDataset(torch.utils.data.Dataset):
     """
     Sliding windows over a single ego vessel's irregular ping sequence.

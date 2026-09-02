@@ -28,3 +28,5 @@ logs/*.err
 
 # OS
 .DS_Store
+venv
+data/

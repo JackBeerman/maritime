@@ -41,6 +41,7 @@ from irregular_ingest import (
     load_dma_ais_csv, build_ego_anchored_snapshots, select_ego_vessels_stratified,
 )
 from graph_data import IrregularVesselDataset, share_mesh_on_device
+from batching import collate_windows, encode_windows_batched, batch_timing_and_targets
 from model import IrregularVTP
 from losses import energy_score_loss
 
@@ -67,6 +68,14 @@ def parse_args():
     p.add_argument('--n-heads', type=int, default=4)
     p.add_argument('--n-layers', type=int, default=3)
     p.add_argument('--n-samples', type=int, default=16)
+    p.add_argument('--batch-size', type=int, default=32,
+                   help='windows per gradient step')
+    p.add_argument('--gnn-chunk-size', type=int, default=16,
+                   help='graphs through the GNN at once; bounds transient memory. '
+                        'Note snapshots here are per-ego-vessel, so unlike the '
+                        'fixed-interval branch there is no reuse to exploit')
+    p.add_argument('--window-stride', type=int, default=1,
+                   help='keep every Nth window per vessel')
     p.add_argument('--lr', type=float, default=1e-3)
     p.add_argument('--n-epochs', type=int, default=50)
     p.add_argument('--val-fraction', type=float, default=0.2)
@@ -115,7 +124,8 @@ def build_datasets(vessel_ids, ais_df, mesh_node_features, mesh_edge_index, devi
         snaps = share_mesh_on_device(snaps, device)
         ds = IrregularVesselDataset(snaps, ego_idx, times, positions,
                                      seq_len=args.seq_len, future_len=args.future_len,
-                                     max_window_span_sec=args.max_window_span_sec)
+                                     max_window_span_sec=args.max_window_span_sec,
+                                     stride=args.window_stride)
         if len(ds) > 0:
             datasets.append(ds)
     return datasets
@@ -227,7 +237,8 @@ def main():
     if len(train_combined) == 0:
         raise RuntimeError("no training windows -- loosen selection or lower --min-ping-gap-sec")
 
-    loader = DataLoader(train_combined, batch_size=1, shuffle=True, collate_fn=lambda b: b[0])
+    loader = DataLoader(train_combined, batch_size=args.batch_size, shuffle=True,
+                         collate_fn=collate_windows)
 
     model = IrregularVTP(hidden=args.hidden, n_heads=args.n_heads,
                           n_layers=args.n_layers).to(device)
@@ -254,24 +265,25 @@ def main():
     for epoch in range(start_epoch, args.n_epochs):
         model.train()
         total = 0.0
-        for ctx, ctx_times, target_pos, target_dts in loader:
-            ego_i = [d['vessel'].ego_mask.nonzero()[0].item() for d in ctx]
-            anchor = ctx[-1]['vessel'].x[ego_i[-1], :2]
-            dts = target_dts.to(anchor.device)
+        n_win = 0
+        for windows in loader:
+            context = encode_windows_batched(model, windows, args.gnn_chunk_size)
+            anchors, targets, dts = batch_timing_and_targets(windows, context.device)
 
             # velocity-normalized target (see module docstring)
             dt_col = dts.clamp(min=eps).unsqueeze(-1)
-            tgt = ((target_pos.to(anchor.device) - anchor) / dt_col) / vel_scale
+            tgt = ((targets - anchors.unsqueeze(1)) / dt_col) / vel_scale
 
-            out = model(ctx, ego_i, ctx_times, dts, n_samples=args.n_samples)
-            loss = energy_score_loss(out, tgt.unsqueeze(0))
+            out = model.head.sample(context, dts, n_samples=args.n_samples)
+            loss = energy_score_loss(out, tgt)
 
             opt.zero_grad()
             loss.backward()
             opt.step()
-            total += loss.item()
+            total += loss.item() * len(windows)
+            n_win += len(windows)
 
-        avg = total / len(train_combined)
+        avg = total / max(n_win, 1)
         print(f"epoch {epoch}: avg loss = {avg:.4f}", flush=True)
         torch.save({'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': opt.state_dict(),

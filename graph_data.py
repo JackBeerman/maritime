@@ -125,7 +125,7 @@ class IrregularVesselDataset(torch.utils.data.Dataset):
     directly by the dt values rather than by absent bins.
     """
     def __init__(self, snapshots, ego_idx_per_step, ping_times_sec, positions,
-                 seq_len=12, future_len=4, max_window_span_sec=None):
+                 seq_len=12, future_len=4, max_window_span_sec=None, stride=1):
         self.snapshots = snapshots
         self.ego_idx_per_step = ego_idx_per_step
         self.ping_times_sec = np.asarray(ping_times_sec, dtype=np.float64)
@@ -133,8 +133,11 @@ class IrregularVesselDataset(torch.utils.data.Dataset):
         self.seq_len = seq_len
         self.future_len = future_len
 
+        # stride>1 keeps every Nth window; consecutive windows overlap in
+        # seq_len-1 timesteps and are highly redundant, so striding trades a
+        # little data for a lot of epoch time.
         starts = []
-        for s in range(len(snapshots) - seq_len - future_len + 1):
+        for s in range(0, len(snapshots) - seq_len - future_len + 1, max(1, stride)):
             if max_window_span_sec is not None:
                 span = self.ping_times_sec[s + seq_len + future_len - 1] - self.ping_times_sec[s]
                 if span > max_window_span_sec:

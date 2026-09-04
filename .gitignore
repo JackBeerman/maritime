@@ -8,23 +8,23 @@ __pycache__/
 venv/
 
 # Data (large, re-downloadable -- lives on /scratch, not in git)
-data/ais/*.csv
-data/ais/*.zip
-data/ne_10m_land/
-data/ports_denmark.csv
+data/
 
 # Training artifacts
-checkpoints/*.pt
-logs/*.out
-logs/*.err
+checkpoints/
+logs/
+cache/
 
 # Container
 *.sif
 .apptainer/
 
-# Generated plots/animations (regenerate from notebooks, don't commit binaries)
+# Generated figures -- regenerate from viz.py rather than committing.
+# The one exception is the README demo, which is tracked deliberately.
 *.gif
 *.png
+!assets/*.gif
+!assets/*.png
 
 # OS
 .DS_Store

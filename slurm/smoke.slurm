@@ -7,19 +7,19 @@
 #SBATCH --gres=gpu:1
 #SBATCH -t 0:30:00
 #SBATCH -c 4
-#SBATCH --mem=64G
+#SBATCH --mem=350G
 
 mkdir -p logs checkpoints
 cd ~/maritime
 source venv/bin/activate
 
 python3 train.py \
-    --ais-glob "/scratch/jtb3sud/maritime/ais/aisdk-*.csv" \
+    --ais-glob "/scratch/jtb3sud/maritime/ais/aisdk-2026-08-25.csv" \
     --land-shp data/ne_10m_land/ne_10m_land.shp \
     --ports-csv data/ports_denmark.csv \
     --n-underway 30 \
     --n-stationary 30 \
-    --n-epochs 5 \
+    --n-epochs 20 \
     --checkpoint-path checkpoints/smoke_checkpoint.pt
 
 echo "Job finished with exit code $?"

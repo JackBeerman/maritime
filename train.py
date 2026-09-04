@@ -177,7 +177,7 @@ def main():
         ais_snapshots, mesh_node_features, mesh_edge_index,
         mesh_x_tensor, mesh_edge_tensor, mesh_tree,
         progress_every=max(1, len(ais_snapshots)//10))
-    world = share_mesh_on_device(world, device)
+    world = [d.to(device) for d in world]
     print(f"  {len(world)} world snapshots on {device}")
 
     train_ds = build_datasets(train_ids, world, row_maps, args.seq_len, args.future_len,

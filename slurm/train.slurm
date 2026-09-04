@@ -12,6 +12,7 @@
 mkdir -p logs checkpoints
 cd ~/maritime
 source venv/bin/activate
+export CUDA_LAUNCH_BLOCKING=1
 
 python3 train.py \
     --ais-glob "/scratch/jtb3sud/maritime/ais/aisdk-*.csv" \
@@ -19,10 +20,13 @@ python3 train.py \
     --ports-csv data/ports_denmark.csv \
     --n-underway 300 \
     --n-stationary 300 \
+    --seq-len 12 \
+    --future-len 4 \
     --hidden 128 \
     --n-layers 4 \
-    --n-epochs 100 \
-    --checkpoint-path checkpoints/checkpoint_large.pt \
-    --resume
+    --batch-size 32 \
+    --gnn-chunk-size 32 \
+    --n-epochs 60 \
+    --checkpoint-path checkpoints/checkpoint_batched.pt
 
 echo "Job finished with exit code $?"

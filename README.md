@@ -1,134 +1,166 @@
 # Maritime Vessel Trajectory Prediction
 
-Predicts a single "ego" vessel's future positions from its recent AIS
-track, the traffic around it, and the surrounding coastline/port
-geometry — outputting a distribution of plausible future paths rather
-than a single point estimate.
+Forecasts where a vessel will be, from its recent AIS track, the traffic
+around it, and the surrounding coastline and ports — as a **distribution
+of plausible futures** rather than a single point estimate.
 
-The architecture and key design choices are directly inspired by
-DeepMind's weather forecasting lineage: a triangulated spatial mesh with
-graph-neural-network message passing (GraphCast), and a functional
-generative sampling head that produces many trajectory samples per
-forward pass instead of one deterministic output (WeatherNext's FGN).
-Most notably, the model predicts a **normalized residual displacement
-from the last known position**, not an absolute coordinate — the same
-residual-prediction approach GraphCast uses for atmospheric state, and
-the single fix that took this model's predicted uncertainty from
-uncorrelated-with-reality to a real, meaningful signal (see Validation).
+![Prediction example](assets/prediction.gif)
 
-Currently configured for Danish waters, using the Danish Maritime
-Authority's public AIS archive.
+*Black: observed track fed to the model. Blue: sampled predicted futures.
+Red: what actually happened. Dashed/dotted: the sample mean and medoid.*
 
-## Architecture
+## Approach
 
-1. **Spatial mesh** (`mesh.py`) — a triangulated graph over the maritime
-   domain, denser near coastlines and ports, built once from Natural
-   Earth coastline data and a port list.
-2. **Heterogeneous graph per timestep** (`graph_data.py`) — mesh nodes
-   plus every vessel present at that timestamp, connected via
-   vessel-to-mesh and vessel-to-vessel (k-NN) edges.
-3. **GNN encoder** (`model.py: MeshVesselGNN`) — two layers of
-   heterogeneous graph convolution, producing a spatial embedding per
-   vessel per timestep.
-4. **Cached causal transformer** (`cached_attention.py`) — attends
-   across the context window's timesteps. Supports both a full-window
-   forward pass (training) and an incremental, KV-cached `.step()` mode
-   (efficient multi-step rollout at inference).
-5. **FGN sampling head** (`model.py: FGNDecoderHead`) — decodes many
-   independent future trajectory samples per window, trained with an
-   energy-score loss that rewards both accuracy and appropriate sample
-   diversity.
+The architecture follows DeepMind's weather-forecasting lineage:
+
+- **GraphCast** — a triangulated spatial mesh with graph-neural-network
+  message passing, and predicting a **residual** from the last known
+  state rather than an absolute position.
+- **WeatherNext FGN** — a sampling head that emits many trajectories per
+  forward pass, trained with an energy score loss so the spread of
+  samples carries real information about uncertainty.
+
+Predicting normalized residual displacement rather than absolute
+coordinates was the single largest improvement in the project: it took
+the correlation between predicted uncertainty and actual movement from
+roughly zero to 0.72.
+
+Domain: Danish waters, using the Danish Maritime Authority's public AIS
+archive.
+
+## Pipeline
+
+1. **Mesh** (`mesh.py`) — Delaunay triangulation over the domain, denser
+   near coastlines and ports. Nodes carry `[lon, lat, is_land, is_port]`.
+2. **Per-timestamp graph** (`graph_data.py`) — mesh nodes plus every
+   vessel present, with vessel↔mesh and vessel↔vessel k-NN edges. One
+   graph per timestamp, **shared across all ego vessels** (see Notes).
+3. **GNN encoder** (`model.py`) — two heterogeneous `SAGEConv` layers.
+4. **Cached causal transformer** (`cached_attention.py`) — full-window
+   pass for training, incremental KV-cached `.step()` for streaming.
+5. **FGN head** (`model.py`) — context + noise → many sampled
+   trajectories.
+
+## Results
+
+Held-out vessels (never trained on), 12 days of AIS, 60-minute forecast:
+
+| metric | value |
+|---|---|
+| spread ↔ displacement correlation | 0.753 |
+| mean error (moving vessels) | 5.37 km |
+| beats persistence baseline | 82.4% |
+
+**On baselines:** two are reported. *Persistence* assumes the vessel
+stays put, so its error equals however far the vessel actually moved —
+an easy bar. *Constant velocity* (dead reckoning) extrapolates the last
+observed velocity, and is genuinely hard to beat because ships mostly
+travel in straight lines. Failure analysis found turning is by far the
+dominant error driver (worst-vs-best window turn angle ratio of 4.0),
+which is consistent with the model doing something close to linear
+extrapolation. **Read `beats_const_velocity_pct`, not
+`beats_persistence_pct`.**
 
 ## Setup
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
+python3 -m venv venv && source venv/bin/activate
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
 
-### Data
+Three data inputs, none in the repo:
 
-Requires three inputs, none committed to this repo:
+```bash
+# coastline
+mkdir -p data/ne_10m_land && cd data/ne_10m_land
+wget https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip && unzip ne_10m_land.zip
 
-1. **Coastline** — Natural Earth 10m land polygons:
-```bash
-   mkdir -p data/ne_10m_land && cd data/ne_10m_land
-   wget https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip
-   unzip ne_10m_land.zip
+# ports: data/ports_denmark.csv with columns name,lon,lat
+
+# AIS (~2 GB/day) -- keep on scratch, not home
+wget http://aisdata.ais.dk/aisdk-YYYY-MM-DD.zip && unzip aisdk-YYYY-MM-DD.zip
 ```
-2. **Ports** — `data/ports_denmark.csv`, columns `name,lon,lat`.
-3. **AIS data** — Danish Maritime Authority daily archives:
-```bash
-   wget http://aisdata.ais.dk/aisdk-YYYY-MM-DD.zip
-   unzip aisdk-YYYY-MM-DD.zip
-```
-   Recommended to store on `/scratch/$USER/` rather than `/home`, given
-   file sizes (~2GB/day) and `/home`'s smaller quota.
 
 ## Usage
 
-**Interactive exploration**: `test_pipeline_denmark.ipynb` — mesh
-construction, coastline/port visualization, a single training step, and
-KV-cache correctness checks.
-
-**Training** (interactive or via SLURM):
 ```bash
 python3 train.py \
     --ais-glob "/scratch/$USER/maritime/ais/aisdk-*.csv" \
-    --land-shp data/ne_10m_land/ne_10m_land.shp \
-    --ports-csv data/ports_denmark.csv \
-    --n-underway 150 --n-stationary 150 \
-    --n-epochs 50 \
-    --checkpoint-path checkpoints/checkpoint.pt \
-    --resume
+    --n-underway 300 --n-stationary 300 \
+    --seq-len 12 --future-len 4 \
+    --hidden 128 --n-layers 4 \
+    --batch-size 32 \
+    --n-epochs 60 \
+    --checkpoint-path checkpoints/model.pt
 ```
-`--resume` continues from `checkpoint-path` if it exists, otherwise
-starts fresh — safe to always include.
 
-**SLURM**: see `train_gcvtp.slurm`.
+Evaluation and figures, from a notebook:
 
-## Key design decisions
+```python
+import viz
 
-- **Delta targets + unit-variance normalization** — predicting
-  normalized displacement rather than absolute coordinates, matching
-  GraphCast's documented residual-prediction approach. Empirically
-  improved the correlation between predicted uncertainty and actual
-  displacement from ~0 to a real, meaningful positive relationship (see
-  Validation).
-- **Stratified vessel sampling** (`ais_ingest.select_ego_vessels_stratified`)
-  — training deliberately balances underway and stationary/anchored
-  vessels, rather than excluding either. Excluding stationary vessels
-  would leave the model unable to correctly predict "stays put," which
-  is a common and valid real-world outcome.
-- **NaN-safe resampling** — real AIS data has legitimately blank
-  SOG/COG on some pings; `resample_to_snapshots` checks all of
-  lon/lat/SOG/COG (not just position) before accepting a timestep.
+ctx = viz.setup(n_underway=300, n_stationary=300, seq_len=12)
+model, norm_scale, meta = viz.load_checkpoint_model('checkpoints/model.pt')
 
-## Validation
+viz.evaluate(model, ctx.combined_val, norm_scale)        # both baselines
+viz.per_step_errors(model, ctx.combined_val, norm_scale) # error vs horizon
+viz.plot_grid(model, ctx.combined_val, norm_scale, ctx)  # moving + stationary
+viz.animate_prediction(model, ctx.combined_val, 0, norm_scale, ctx)
 
-On a real single-day training run (27 vessels, 903 windows, 20 epochs):
-- Predicted-uncertainty-vs-actual-displacement correlation: 0.68
-  (vs. ~0 with absolute-coordinate targets).
-- On genuinely moving vessels (>1km displacement), the model beat a
-  trivial "assume no movement" baseline on 88% of windows (mean error
-  3.23km vs. 9.08km baseline).
+records = viz.analyze_failures(model, ctx.combined_val, norm_scale, ctx)
+viz.summarize_failures(records)                          # what drives errors
+```
 
-This was an early, small-scale run intended to validate the pipeline,
-not a final result — see `train_gcvtp.slurm` for the full-scale
-configuration.
+Pass the same `n_underway` / `n_stationary` / `val_seed` the training run
+used — `setup` reproduces the train/val split to keep evaluation on
+genuinely held-out vessels, and mismatched parameters silently mix in
+vessels the model trained on.
 
-## Repo structure
-mesh.py -- spatial mesh construction
-coastline.py -- coastline/port loading, domain bounds
-ais_ingest.py -- AIS parsing, resampling, vessel selection
-graph_data.py -- HeteroData graph construction, windowed dataset
-cached_attention.py -- KV-cached causal transformer
-model.py -- GNN + transformer + FGN head, full model
-losses.py -- energy score loss
-train.py -- standalone training script (SLURM-ready)
-inference.py -- multi-step rollout / forecasting
-train_gcvtp.slurm -- SLURM batch script
-test_pipeline_denmark.ipynb -- interactive exploration notebook
+## Branches
+
+- **`main`** — fixed 15-minute resampling. Interpolates across single
+  gaps; every forecast is exactly 60 minutes ahead.
+- **`irregular-sampling`** — raw AIS pings, no resampling or
+  interpolation. Elapsed time is an explicit feature, attention is
+  encoded over real seconds rather than step index, and the head is
+  conditioned on each target's Δt so it can be queried at arbitrary
+  horizons. Motivated by measurement: per-vessel median ping intervals
+  span 10 s to 284 s, a 28× range that fixed binning hides. Slightly
+  behind on accuracy so far, but it is the version that could run on a
+  live AIS stream.
+
+## Notes
+
+- **World snapshots are shared across ego vessels.** The world at a
+  timestamp does not depend on which vessel you are forecasting — only
+  the choice of ego row does. Building one graph per *(vessel,
+  timestamp)* pair duplicated the same graph hundreds of times; sharing
+  measured an 856× memory reduction and is what made multi-day runs
+  possible.
+- **Stationary vessels are sampled, not excluded.** A deployed predictor
+  has to handle "stays put" as a valid outcome.
+- **Train/val splits are by vessel, not by window.** Windows from one
+  vessel overlap heavily, so a window-level split would leak.
+- **Known issue:** batched training intermittently triggers a CUDA
+  device-side assert inside `encode_windows_batched`. Setting
+  `CUDA_LAUNCH_BLOCKING=1` avoids it at some throughput cost;
+  `--resume` makes an interrupted run cheap to continue. Unresolved.
+
+## Files
+
+```
+mesh.py               spatial mesh construction
+coastline.py           coastline/port loading, domain bounds
+ais_ingest.py          AIS parsing, resampling, vessel selection
+ais_cache.py           disk cache for the load+resample stage
+graph_data.py          graph construction, windowed dataset
+cached_attention.py    KV-cached causal transformer
+model.py               GNN + transformer + FGN head
+losses.py              energy score loss
+batching.py            batched window encoding with snapshot dedup
+train.py               training entry point
+inference.py           multi-step rollout
+viz.py                 evaluation, plots, animations, failure analysis
+slurm/                 batch scripts
+```

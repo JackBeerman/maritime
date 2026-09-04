@@ -40,7 +40,7 @@ from mesh import sample_domain_points, build_mesh
 from irregular_ingest import (
     load_dma_ais_csv, build_ego_anchored_snapshots, select_ego_vessels_stratified,
 )
-from graph_data import IrregularVesselDataset, share_mesh_on_device
+from graph_data import IrregularVesselDataset
 from batching import collate_windows, encode_windows_batched, batch_timing_and_targets
 from model import IrregularVTP
 from losses import energy_score_loss
@@ -121,7 +121,11 @@ def build_datasets(vessel_ids, ais_df, mesh_node_features, mesh_edge_index, devi
         )
         if len(snaps) < args.seq_len + args.future_len:
             continue
-        snaps = share_mesh_on_device(snaps, device)
+        # NOTE: do NOT share one mesh tensor across snapshots here.
+        # Doing so caused a CUDA device-side assert (out-of-bounds gather)
+        # once training ran at scale on the fixed-interval branch; giving
+        # each snapshot its own mesh copy is the working configuration.
+        snaps = [d.to(device) for d in snaps]
         ds = IrregularVesselDataset(snaps, ego_idx, times, positions,
                                      seq_len=args.seq_len, future_len=args.future_len,
                                      max_window_span_sec=args.max_window_span_sec,

@@ -48,8 +48,8 @@ class IrregularVTPPredictor(Predictor):
 
     def _snapshot(self, ego_row, neighbors, staleness, dt_own):
         """Build one ego-anchored HeteroData from plain arrays."""
-        from graph_data import build_hetero_snapshot
-        from irregular_ingest import one_hot_vessel_type, DT_REFERENCE_SEC, STALENESS_REFERENCE_SEC
+        from vtp.data.graphs import build_hetero_snapshot
+        from vtp.data.ingest import one_hot_vessel_type, DT_REFERENCE_SEC, STALENESS_REFERENCE_SEC
 
         rows = [ego_row]
         if neighbors is not None and len(neighbors):
@@ -140,7 +140,7 @@ class FixedIntervalVTPPredictor(Predictor):
 
     @torch.no_grad()
     def predict(self, window, n_samples=32):
-        from graph_data import build_world_snapshot
+        from vtp.data.graphs import build_world_snapshot
         from ais_ingest import one_hot_vessel_type
 
         # resample the window's irregular context onto this model's grid,

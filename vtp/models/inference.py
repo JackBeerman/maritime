@@ -7,8 +7,8 @@ independently per sample thread.
 """
 import numpy as np
 import torch
-from cached_attention import KVCache
-from graph_data import build_hetero_snapshot
+from vtp.models.attention import KVCache
+from vtp.data.graphs import build_hetero_snapshot
 
 
 @torch.no_grad()

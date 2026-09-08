@@ -48,7 +48,7 @@ def main():
     # Detect which branch we're in by which viz module is present, rather
     # than by directory name -- the worktrees can be renamed.
     try:
-        import viz_irregular as V
+        import vtp.viz.plots as V
         branch = 'irregular'
     except ImportError:
         import viz as V

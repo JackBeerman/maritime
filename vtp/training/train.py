@@ -35,19 +35,19 @@ import torch
 from scipy.spatial import cKDTree
 from torch.utils.data import ConcatDataset, DataLoader
 
-from coastline import load_land_polygons, load_ports, DMA_BOUNDS
-from mesh import sample_domain_points, build_mesh
-from irregular_ingest import (
+from vtp.data.coastline import load_land_polygons, load_ports, DMA_BOUNDS
+from vtp.data.mesh import sample_domain_points, build_mesh
+from vtp.data.ingest import (
     load_dma_ais_csv, build_ego_anchored_snapshots, select_ego_vessels_stratified,
 )
-from graph_data import IrregularVesselDataset
-from batching import collate_windows, encode_windows_batched, batch_timing_and_targets
-from distributed import (
+from vtp.data.graphs import IrregularVesselDataset
+from vtp.training.batching import collate_windows, encode_windows_batched, batch_timing_and_targets
+from vtp.training.distributed import (
     setup_distributed, cleanup_distributed, wrap_model, unwrap, make_loader,
     scaled_lr, all_reduce_mean, is_main_process, rank0_print, barrier,
 )
-from model import IrregularVTP
-from losses import energy_score_loss
+from vtp.models.irregular_vtp import IrregularVTP
+from vtp.models.losses import energy_score_loss
 
 
 def parse_args():

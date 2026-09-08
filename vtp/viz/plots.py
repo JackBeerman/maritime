@@ -1,7 +1,7 @@
 """
 Reusable evaluation and visualization for the IRREGULAR-SAMPLING branch.
 
-    from viz_irregular import (setup, load_checkpoint_model, evaluate,
+    from vtp.viz.plots import (setup, load_checkpoint_model, evaluate,
                                plot_prediction, plot_grid, animate_prediction,
                                per_horizon_errors, analyze_failures,
                                summarize_failures)
@@ -33,13 +33,13 @@ from matplotlib.patches import Polygon as MplPolygon
 from scipy.spatial import cKDTree
 from torch.utils.data import ConcatDataset
 
-from coastline import load_land_polygons, load_ports, DMA_BOUNDS
-from mesh import sample_domain_points, build_mesh
-from irregular_ingest import (
+from vtp.data.coastline import load_land_polygons, load_ports, DMA_BOUNDS
+from vtp.data.mesh import sample_domain_points, build_mesh
+from vtp.data.ingest import (
     load_dma_ais_csv, build_ego_anchored_snapshots, select_ego_vessels_stratified,
 )
-from graph_data import IrregularVesselDataset
-from model import IrregularVTP
+from vtp.data.graphs import IrregularVesselDataset
+from vtp.models.irregular_vtp import IrregularVTP
 
 
 def haversine_km(lon1, lat1, lon2, lat2):

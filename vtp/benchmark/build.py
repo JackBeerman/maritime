@@ -155,8 +155,8 @@ def main():
     p.add_argument('--seed', type=int, default=42)
     args = p.parse_args()
 
-    from irregular_ingest import load_dma_ais_csv, select_ego_vessels_stratified
-    from coastline import DMA_BOUNDS
+    from vtp.data.ingest import load_dma_ais_csv, select_ego_vessels_stratified
+    from vtp.data.coastline import DMA_BOUNDS
 
     print(f"loading {args.ais_path} ...", flush=True)
     df = load_dma_ais_csv(args.ais_path, DMA_BOUNDS)

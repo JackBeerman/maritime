@@ -3,9 +3,9 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import HeteroConv, SAGEConv
 
-from cached_attention import TimeAwareTemporalTransformer, KVCache
-from coastline import DMA_BOUNDS
-from irregular_ingest import VESSEL_FEATURE_DIM
+from vtp.models.attention import TimeAwareTemporalTransformer, KVCache
+from vtp.data.coastline import DMA_BOUNDS
+from vtp.data.ingest import VESSEL_FEATURE_DIM
 
 
 class MeshVesselGNN(nn.Module):

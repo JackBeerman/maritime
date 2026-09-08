@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from graph_data import build_hetero_snapshot
+from vtp.data.graphs import build_hetero_snapshot
 
 
 VESSEL_TYPE_VOCAB = {

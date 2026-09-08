@@ -42,6 +42,10 @@ from irregular_ingest import (
 )
 from graph_data import IrregularVesselDataset
 from batching import collate_windows, encode_windows_batched, batch_timing_and_targets
+from distributed import (
+    setup_distributed, cleanup_distributed, wrap_model, unwrap, make_loader,
+    scaled_lr, all_reduce_mean, is_main_process, rank0_print, barrier,
+)
 from model import IrregularVTP
 from losses import energy_score_loss
 
@@ -82,6 +86,9 @@ def parse_args():
     p.add_argument('--val-seed', type=int, default=42)
     p.add_argument('--checkpoint-path', type=str, default='checkpoints/irregular.pt')
     p.add_argument('--resume', action='store_true')
+    p.add_argument('--distributed', action='store_true',
+                   help='multi-GPU via torchrun --nproc_per_node=N')
+    p.add_argument('--lr-scale-rule', choices=['sqrt', 'linear', 'none'], default='sqrt')
     return p.parse_args()
 
 
@@ -121,11 +128,9 @@ def build_datasets(vessel_ids, ais_df, mesh_node_features, mesh_edge_index, devi
         )
         if len(snaps) < args.seq_len + args.future_len:
             continue
-        # NOTE: do NOT share one mesh tensor across snapshots here.
-        # Doing so caused a CUDA device-side assert (out-of-bounds gather)
-        # once training ran at scale on the fixed-interval branch; giving
-        # each snapshot its own mesh copy is the working configuration.
-        snaps = [d.to(device) for d in snaps]
+        # Snapshots stay on CPU. Batching moves one chunk at a time
+        # (see batching.py) -- holding a 12-day dataset on the GPU meant
+        # ~50 GB of duplicated mesh and OOM'd an 80 GB A100.
         ds = IrregularVesselDataset(snaps, ego_idx, times, positions,
                                      seq_len=args.seq_len, future_len=args.future_len,
                                      max_window_span_sec=args.max_window_span_sec,
@@ -193,8 +198,8 @@ def run_validation(model, dataset, vel_scale, n_samples=32, min_move_km=1.0, eps
 
 def main():
     args = parse_args()
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"device: {device}")
+    device, rank, world_size = setup_distributed()
+    rank0_print(f"device: {device} | world size: {world_size}")
     os.makedirs(os.path.dirname(args.checkpoint_path) or '.', exist_ok=True)
 
     bounds = DMA_BOUNDS
@@ -241,17 +246,22 @@ def main():
     if len(train_combined) == 0:
         raise RuntimeError("no training windows -- loosen selection or lower --min-ping-gap-sec")
 
-    loader = DataLoader(train_combined, batch_size=args.batch_size, shuffle=True,
-                         collate_fn=collate_windows)
+    loader, sampler = make_loader(train_combined, args.batch_size, collate_windows,
+                                   shuffle=True, seed=args.val_seed)
 
     model = IrregularVTP(hidden=args.hidden, n_heads=args.n_heads,
                           n_layers=args.n_layers).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    model = wrap_model(model, device)
+    lr = scaled_lr(args.lr, world_size, args.lr_scale_rule)
+    if world_size > 1:
+        rank0_print(f"  lr {args.lr} -> {lr:.2e} ({args.lr_scale_rule} rule, "
+                    f"effective batch {args.batch_size * world_size})")
+    opt = torch.optim.AdamW(model.parameters(), lr=lr)
 
     vel_scale, start_epoch = None, 0
     if args.resume and os.path.exists(args.checkpoint_path):
         ck = torch.load(args.checkpoint_path, map_location=device)
-        model.load_state_dict(ck['model_state_dict'])
+        unwrap(model).load_state_dict(ck['model_state_dict'])
         opt.load_state_dict(ck['optimizer_state_dict'])
         vel_scale = ck['vel_scale']
         start_epoch = ck['epoch'] + 1
@@ -270,15 +280,18 @@ def main():
         model.train()
         total = 0.0
         n_win = 0
+        if sampler is not None:
+            sampler.set_epoch(epoch)
         for windows in loader:
-            context = encode_windows_batched(model, windows, args.gnn_chunk_size)
+            context = encode_windows_batched(unwrap(model), windows,
+                                              args.gnn_chunk_size, device)
             anchors, targets, dts = batch_timing_and_targets(windows, context.device)
 
             # velocity-normalized target (see module docstring)
             dt_col = dts.clamp(min=eps).unsqueeze(-1)
             tgt = ((targets - anchors.unsqueeze(1)) / dt_col) / vel_scale
 
-            out = model.head.sample(context, dts, n_samples=args.n_samples)
+            out = unwrap(model).head.sample(context, dts, n_samples=args.n_samples)
             loss = energy_score_loss(out, tgt)
 
             opt.zero_grad()
@@ -287,18 +300,21 @@ def main():
             total += loss.item() * len(windows)
             n_win += len(windows)
 
-        avg = total / max(n_win, 1)
-        print(f"epoch {epoch}: avg loss = {avg:.4f}", flush=True)
-        torch.save({'model_state_dict': model.state_dict(),
+        avg = all_reduce_mean(total / max(n_win, 1), device)
+        rank0_print(f"epoch {epoch}: avg loss = {avg:.4f}")
+        if is_main_process():
+            torch.save({'model_state_dict': unwrap(model).state_dict(),
                     'optimizer_state_dict': opt.state_dict(),
-                    'vel_scale': vel_scale, 'epoch': epoch, 'avg_loss': avg,
-                    'args': vars(args)}, args.checkpoint_path)
+                        'vel_scale': vel_scale, 'epoch': epoch, 'avg_loss': avg,
+                        'args': vars(args)}, args.checkpoint_path)
+        barrier()
 
-    print("training complete.")
-    if val_combined is not None and len(val_combined) > 0:
-        print("\nvalidation on held-out vessels...")
-        for k, v in run_validation(model, val_combined, vel_scale).items():
+    rank0_print("training complete.")
+    if is_main_process() and val_combined is not None and len(val_combined) > 0:
+        print("\nvalidation on held-out vessels...", flush=True)
+        for k, v in run_validation(unwrap(model), val_combined, vel_scale).items():
             print(f"  {k}: {v}")
+    cleanup_distributed()
 
 
 if __name__ == '__main__':

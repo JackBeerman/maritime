@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vtp"
+version = "0.2.0"
+description = "Vessel trajectory prediction from irregular AIS, with a portable benchmark"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "shapely",
+    "geopandas",
+    "matplotlib",
+    "pillow",
+]
+
+# torch and torch_geometric are deliberately NOT listed. torch must be
+# installed against a specific CUDA build:
+#   pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+#   pip install torch_geometric
+# Pinning them here would pull a CPU wheel and silently break GPU runs.
+
+[project.optional-dependencies]
+dev = ["jupytext", "jupyterlab"]
+
+[project.scripts]
+vtp-train = "vtp.training.train:main"
+vtp-benchmark-build = "vtp.benchmark.build:main"
+
+[tool.setuptools.packages.find]
+include = ["vtp*"]

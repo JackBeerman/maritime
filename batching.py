@@ -15,6 +15,14 @@ speedup than the fixed-interval branch gets.
 Windows here also carry per-window timing (`ctx_times`, `target_dts`),
 which must be stacked into batch tensors so the time-aware transformer
 and the dt-conditioned head see the right values per row.
+
+Snapshots stay on CPU; only the current chunk is moved to the GPU. This
+branch needs that more than the fixed-interval one: snapshots are
+per-ego-vessel, so a 12-day run built ~151,000 of them, and each carries
+its own mesh copy (~348 KB) -- about 50 GB of duplicated mesh, which
+OOM'd an 80 GB A100. Per-chunk transfer holds a few MB at a time, so
+dataset size no longer bounds what fits. `Batch.from_data_list(...)`
+also returns a NEW object, so the CPU originals are never mutated.
 """
 import torch
 from torch_geometric.data import Batch
@@ -25,12 +33,17 @@ def collate_windows(batch):
     return batch
 
 
-def encode_windows_batched(model, windows, gnn_chunk_size=16):
+def _model_device(model):
+    return next(model.parameters()).device
+
+
+def encode_windows_batched(model, windows, gnn_chunk_size=16, device=None):
     """
     windows: list of (ctx, ctx_times, target_positions, target_dts).
     Returns (B, hidden) context embeddings, matching what the unbatched
     model.encode_context() produces per window.
     """
+    device = device or _model_device(model)
     B = len(windows)
     T = len(windows[0][0])
 
@@ -43,14 +56,11 @@ def encode_windows_batched(model, windows, gnn_chunk_size=16):
     embeds = []
     for i in range(0, len(flat), gnn_chunk_size):
         chunk = flat[i:i + gnn_chunk_size]
-        if len(chunk) == 1:
-            embeds.append(model.gnn(chunk[0]))
-            continue
-        b = Batch.from_data_list(chunk)
+        b = Batch.from_data_list(chunk).to(device)
         out = model.gnn(b)
-        ptr = b['vessel'].ptr
+        ptr = b['vessel'].ptr.cpu()
         for j in range(len(chunk)):
-            embeds.append(out[ptr[j]:ptr[j + 1]])
+            embeds.append(out[int(ptr[j]):int(ptr[j + 1])])
 
     ego_embeds = torch.stack([embeds[k][ego_rows[k]] for k in range(len(flat))])
     seq = ego_embeds.view(B, T, -1)

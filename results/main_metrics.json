@@ -1,25 +1,25 @@
 {
   "n_windows": 3563,
-  "spread_correlation": 0.6934157162088412,
+  "spread_correlation": 0.6950279311449189,
   "n_moving": 1179,
-  "model_mean_error_km": 4.769799709320068,
+  "model_mean_error_km": 4.813174724578857,
   "persistence_error_km": 9.944934844970703,
-  "beats_persistence_pct": 82.27311280746396,
+  "beats_persistence_pct": 82.95165394402035,
   "const_velocity_error_km": 5.591855049133301,
-  "beats_const_velocity_pct": 47.32824427480916,
+  "beats_const_velocity_pct": 47.92196776929602,
   "branch": "main",
   "checkpoint": "checkpoint_batched.pt",
-  "ckpt_epoch": 6,
-  "ckpt_avg_loss": 0.6640712751698744,
+  "ckpt_epoch": 17,
+  "ckpt_avg_loss": 0.5973586462124133,
   "ckpt_hidden": 128,
   "ckpt_n_layers": 4,
   "ckpt_vessel_in": 12,
   "ckpt_future_len": 4,
   "median_horizon_min": 60.0,
   "per_step_error_km": [
-    0.3285941779613495,
-    0.7350580096244812,
-    1.183459997177124,
-    1.659693717956543
+    0.3153453469276428,
+    0.7170766592025757,
+    1.1602085828781128,
+    1.634910225868225
   ]
 }

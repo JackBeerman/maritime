@@ -5,13 +5,14 @@
 #SBATCH -e logs/maritime_train_%j.err
 #SBATCH -p gpu
 #SBATCH --gres=gpu:a100:1
-#SBATCH -t 12:00:00
+#SBATCH -t 72:00:00
 #SBATCH -c 4
 #SBATCH --mem=350G
 
 mkdir -p logs checkpoints
 cd ~/maritime
 source venv/bin/activate
+
 export CUDA_LAUNCH_BLOCKING=1
 
 python3 train.py \
@@ -27,6 +28,7 @@ python3 train.py \
     --batch-size 32 \
     --gnn-chunk-size 32 \
     --n-epochs 60 \
-    --checkpoint-path checkpoints/checkpoint_batched.pt
+    --checkpoint-path checkpoints/checkpoint_batched.pt \
+    --resume
 
 echo "Job finished with exit code $?"

@@ -22,11 +22,22 @@ Two savings are available here, and this module takes both:
    are gathered afterwards. The larger the batch, the better this ratio
    gets.
 
-Memory note: batching replicates the mesh once per graph in the chunk
-(~348 KB each, plus activations), so `gnn_chunk_size` bounds transient
-memory. It is deliberately separate from `batch_size`: the batch decides
-how many windows share a gradient step, the chunk decides how many
-graphs go through the GNN at once.
+Snapshots are kept on CPU and only the current chunk is moved to the
+GPU. That matters for two reasons:
+
+  * **Memory.** Every snapshot carries its own mesh copy (~348 KB).
+    Holding a whole dataset on the GPU meant tens of GB of duplicated
+    mesh -- 50 GB on the irregular branch, which simply OOM'd. With
+    per-chunk transfer the GPU holds a few MB of mesh at a time, so
+    dataset size no longer bounds what fits.
+  * **Safety.** `Batch.from_data_list(...)` returns a NEW object, so
+    moving it leaves the CPU originals untouched. `HeteroData.to()`
+    mutates in place, and mutating shared snapshots mid-epoch was the
+    source of an earlier class of corruption.
+
+Transfer cost is small next to the GNN forward/backward (a 32-graph
+chunk is ~30 MB, a few milliseconds), so `gnn_chunk_size` now bounds GPU
+memory almost entirely. Lower it first if you hit OOM.
 """
 import torch
 from torch_geometric.data import Batch
@@ -37,12 +48,18 @@ def collate_windows(batch):
     return batch
 
 
-def encode_windows_batched(model, windows, gnn_chunk_size=32):
+def _model_device(model):
+    return next(model.parameters()).device
+
+
+def encode_windows_batched(model, windows, gnn_chunk_size=32, device=None):
     """
-    windows: list of (ctx, ego_rows, target) from VesselSequenceDataset.
-    Returns (B, hidden) context embeddings -- the same value the
-    unbatched model.encode_context() produces per window.
+    windows: list of (ctx, ego_rows, target) from VesselSequenceDataset,
+    holding CPU snapshots. Returns (B, hidden) context embeddings on the
+    model's device -- the same value the unbatched encode_context()
+    produces per window.
     """
+    device = device or _model_device(model)
     B = len(windows)
     T = len(windows[0][0])
 
@@ -63,14 +80,13 @@ def encode_windows_batched(model, windows, gnn_chunk_size=32):
     embeds = []
     for i in range(0, len(uniq_list), gnn_chunk_size):
         chunk = uniq_list[i:i + gnn_chunk_size]
-        if len(chunk) == 1:
-            embeds.append(model.gnn(chunk[0]))
-            continue
-        b = Batch.from_data_list(chunk)
+        # collate on CPU, then move the (new) batch object to the GPU --
+        # the source snapshots stay on CPU and are never mutated
+        b = Batch.from_data_list(chunk).to(device)
         out = model.gnn(b)
-        ptr = b['vessel'].ptr
+        ptr = b['vessel'].ptr.cpu()
         for j in range(len(chunk)):
-            embeds.append(out[ptr[j]:ptr[j + 1]])
+            embeds.append(out[int(ptr[j]):int(ptr[j + 1])])
 
     ego_embeds = torch.stack([embeds[ref[k]][ego_rows_flat[k]]
                                for k in range(len(ref))])
@@ -78,13 +94,15 @@ def encode_windows_batched(model, windows, gnn_chunk_size=32):
     return model.temporal(seq)[:, -1, :]
 
 
-def batch_anchors_and_targets(windows):
+def batch_anchors_and_targets(windows, device=None):
     """
-    Anchor positions (B, 2) and target positions (B, future_len, 2),
-    stacked from a list of windows.
+    Anchor positions (B, 2) and target positions (B, future_len, 2).
+    Read from CPU snapshots and moved once, rather than per window.
     """
     anchors = torch.stack([w[0][-1]['vessel'].x[int(w[1][-1]), :2] for w in windows])
     targets = torch.stack([w[2] for w in windows])
+    if device is not None:
+        anchors, targets = anchors.to(device), targets.to(device)
     return anchors, targets
 
 

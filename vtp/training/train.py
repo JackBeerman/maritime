@@ -28,6 +28,7 @@ normalized units at longer horizons. Recovering a position:
 """
 import argparse
 import glob
+import json
 import os
 import numpy as np
 import pandas as pd
@@ -35,19 +36,19 @@ import torch
 from scipy.spatial import cKDTree
 from torch.utils.data import ConcatDataset, DataLoader
 
-from vtp.data.coastline import load_land_polygons, load_ports, DMA_BOUNDS
-from vtp.data.mesh import sample_domain_points, build_mesh
-from vtp.data.ingest import (
+from coastline import load_land_polygons, load_ports, DMA_BOUNDS
+from mesh import sample_domain_points, build_mesh
+from irregular_ingest import (
     load_dma_ais_csv, build_ego_anchored_snapshots, select_ego_vessels_stratified,
 )
-from vtp.data.graphs import IrregularVesselDataset
-from vtp.training.batching import collate_windows, encode_windows_batched, batch_timing_and_targets
-from vtp.training.distributed import (
+from graph_data import IrregularVesselDataset
+from batching import collate_windows, encode_windows_batched, batch_timing_and_targets
+from distributed import (
     setup_distributed, cleanup_distributed, wrap_model, unwrap, make_loader,
     scaled_lr, all_reduce_mean, is_main_process, rank0_print, barrier,
 )
-from vtp.models.irregular_vtp import IrregularVTP
-from vtp.models.losses import energy_score_loss
+from model import IrregularVTP
+from losses import energy_score_loss
 
 
 def parse_args():
@@ -84,6 +85,14 @@ def parse_args():
     p.add_argument('--n-epochs', type=int, default=50)
     p.add_argument('--val-fraction', type=float, default=0.2)
     p.add_argument('--val-seed', type=int, default=42)
+    p.add_argument('--val-every', type=int, default=5,
+                   help='run held-out validation every N epochs (0 disables). '
+                        'Training loss falling while validation stalls is the '
+                        'overfitting signal; without this you only find out at the end')
+    p.add_argument('--val-subsample', type=int, default=400,
+                   help='windows scored in the periodic check; the final run uses all')
+    p.add_argument('--early-stop-patience', type=int, default=0,
+                   help='stop if validation FDE has not improved for N checks (0 = never)')
     p.add_argument('--checkpoint-path', type=str, default='checkpoints/irregular.pt')
     p.add_argument('--resume', action='store_true')
     p.add_argument('--distributed', action='store_true',
@@ -156,24 +165,32 @@ def compute_velocity_scale(dataset, eps=1e-6):
 
 
 @torch.no_grad()
-def run_validation(model, dataset, vel_scale, n_samples=32, min_move_km=1.0, eps=1e-6):
+def run_validation(model, dataset, vel_scale, n_samples=32, min_move_km=1.0, eps=1e-6,
+                    max_windows=None, seed=0):
+    """
+    Held-out metrics.
+
+    `max_windows` subsamples for the periodic in-training check: scoring
+    every window each epoch would cost more than the epoch itself, and a
+    few hundred windows is plenty to see whether validation is tracking
+    training or diverging from it. The final run uses the full set.
+    """
     model.eval()
     device = next(model.parameters()).device
-    disps, spreads, errs, base_errs, hors = [], [], [], [], []
+    disps, spreads, errs, base_errs, dts = [], [], [], [], []
 
-    for i in range(len(dataset)):
+    idxs = range(len(dataset))
+    if max_windows is not None and max_windows < len(dataset):
+        idxs = np.random.default_rng(seed).choice(len(dataset), max_windows, replace=False)
+
+    for i in idxs:
         ctx, ctx_times, target_pos, target_dts = dataset[i]
         ego_i = [d['vessel'].ego_mask.nonzero()[0].item() for d in ctx]
-        # snapshots live on CPU now; move this window's copies to the
-        # model's device rather than mutating the shared originals
-        ctx = [d.clone().to(device) for d in ctx]
-        target_pos = target_pos.to(device)
-        target_dts_dev = target_dts.to(device)
         anchor = ctx[-1]['vessel'].x[ego_i[-1], :2]
 
-        out = model(ctx, ego_i, ctx_times, target_dts_dev, n_samples=n_samples)
-        dt_col = target_dts_dev.clamp(min=eps).view(1, 1, -1, 1)
-        pred = out * vel_scale * dt_col + anchor          # (1, S, F, 2)
+        out = model(ctx, ego_i, ctx_times, target_dts.to(anchor.device), n_samples=n_samples)
+        dt = target_dts.to(anchor.device).clamp(min=eps).view(1, 1, -1, 1)
+        pred = out * vel_scale * dt + anchor           # (1, S, F, 2)
 
         final = pred[0, :, -1, :].cpu().numpy()
         truth = target_pos[-1].cpu().numpy()
@@ -185,13 +202,13 @@ def run_validation(model, dataset, vel_scale, n_samples=32, min_move_km=1.0, eps
 
         disps.append(moved)
         spreads.append(spread)
-        hors.append(float(target_dts[-1]))               # accumulator, not the tensor
+        dts.append(float(target_dts[-1]))
         if moved > min_move_km:
             errs.append(haversine_km(center[0], center[1], truth[0], truth[1]))
             base_errs.append(moved)
 
-    res = {'n_val_windows': len(dataset),
-           'median_target_horizon_min': float(np.median(hors)) / 60.0,
+    res = {'n_val_windows': len(disps),
+           'median_target_horizon_min': float(np.median(dts)) / 60.0,
            'spread_correlation': float(np.corrcoef(disps, spreads)[0, 1]) if len(disps) > 1 else float('nan')}
     if errs:
         errs, base_errs = np.array(errs), np.array(base_errs)
@@ -280,7 +297,20 @@ def main():
         vel_scale = compute_velocity_scale(train_combined)
     print(f"  vel_scale: {vel_scale:.3e} deg/sec")
 
-    print("training...")
+    # best-checkpoint tracking: the last epoch is not necessarily the
+    # best one, and without this an overfitting run silently overwrites
+    # its own best weights
+    best_path = args.checkpoint_path.replace('.pt', '_best.pt')
+    history_path = args.checkpoint_path.replace('.pt', '_history.json')
+    history, best_val, best_epoch, stale_checks = [], None, None, 0
+    if args.resume and os.path.exists(args.checkpoint_path):
+        _ck = torch.load(args.checkpoint_path, map_location='cpu')
+        history = _ck.get('history', [])
+        best_val = _ck.get('best_val_error_km')
+        best_epoch = _ck.get('best_epoch')
+
+    rank0_print(f"training... (validation every {args.val_every} epochs on "
+                f"{args.val_subsample} windows)")
     eps = 1e-6
     for epoch in range(start_epoch, args.n_epochs):
         model.train()
@@ -307,17 +337,58 @@ def main():
             n_win += len(windows)
 
         avg = all_reduce_mean(total / max(n_win, 1), device)
-        rank0_print(f"epoch {epoch}: avg loss = {avg:.4f}")
+
+        val_line, val_err = "", None
+        do_val = (args.val_every and val_combined is not None
+                  and len(val_combined) > 0
+                  and ((epoch + 1) % args.val_every == 0 or epoch == args.n_epochs - 1))
+        if do_val and is_main_process():
+            vres = run_validation(unwrap(model), val_combined, vel_scale,
+                                   max_windows=args.val_subsample, seed=args.val_seed)
+            val_err = vres.get('model_mean_error_km')
+            history.append({'epoch': epoch, 'train_loss': avg, **vres})
+            val_line = (f" | val err {val_err:.3f} km"
+                        f" (baseline {vres.get('trivial_baseline_mean_error_km', float('nan')):.3f})"
+                        f" corr {vres.get('spread_correlation', float('nan')):.3f}")
+            model.train()          # run_validation put it in eval mode
+
+        rank0_print(f"epoch {epoch}: avg loss = {avg:.4f}{val_line}")
+
+        if val_err is not None:
+            if best_val is None or val_err < best_val - 1e-6:
+                best_val, best_epoch, stale_checks = val_err, epoch, 0
+                if is_main_process():
+                    torch.save({'model_state_dict': unwrap(model).state_dict(),
+                                'optimizer_state_dict': opt.state_dict(),
+                                'vel_scale': vel_scale, 'epoch': epoch,
+                                'avg_loss': avg, 'val_error_km': val_err,
+                                'args': vars(args)}, best_path)
+            else:
+                stale_checks += 1
+
         if is_main_process():
             torch.save({'model_state_dict': unwrap(model).state_dict(),
                     'optimizer_state_dict': opt.state_dict(),
                         'vel_scale': vel_scale, 'epoch': epoch, 'avg_loss': avg,
+                        'history': history, 'best_val_error_km': best_val,
+                        'best_epoch': best_epoch,
                         'args': vars(args)}, args.checkpoint_path)
+            if history:
+                with open(history_path, 'w') as f:
+                    json.dump(history, f, indent=2)
         barrier()
+
+        if (args.early_stop_patience and stale_checks >= args.early_stop_patience):
+            rank0_print(f"early stop: no validation improvement for "
+                        f"{stale_checks} checks (best {best_val:.3f} km @ epoch {best_epoch})")
+            break
 
     rank0_print("training complete.")
     if is_main_process() and val_combined is not None and len(val_combined) > 0:
-        print("\nvalidation on held-out vessels...", flush=True)
+        if best_val is not None:
+            print(f"\nbest validation: {best_val:.3f} km @ epoch {best_epoch} "
+                  f"-> {best_path}", flush=True)
+        print("\nfinal validation on ALL held-out windows...", flush=True)
         for k, v in run_validation(unwrap(model), val_combined, vel_scale).items():
             print(f"  {k}: {v}")
     cleanup_distributed()

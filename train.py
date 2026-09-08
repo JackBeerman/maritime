@@ -24,6 +24,7 @@ from ais_ingest import (
     build_world_snapshots, vessel_presence, VESSEL_FEATURE_DIM,
 )
 from graph_data import VesselSequenceDataset, share_mesh_on_device
+from ais_cache import load_and_resample_cached, select_ego_vessels_from_stats
 from batching import (
     collate_windows, encode_windows_batched, batch_anchors_and_targets, dedup_ratio,
 )
@@ -41,6 +42,13 @@ def parse_args():
     p.add_argument('--min-pings', type=int, default=40)
     p.add_argument('--sog-threshold-knots', type=float, default=2.0)
     p.add_argument('--interval-minutes', type=int, default=15)
+    p.add_argument('--n-open-water', type=int, default=3000,
+                   help='mesh sample points in open water; controls mesh density')
+    p.add_argument('--n-coastal', type=int, default=4000,
+                   help='mesh sample points along coastlines/ports')
+    p.add_argument('--cache-dir', type=str, default='cache',
+                   help='disk cache for the load+resample stage')
+    p.add_argument('--no-cache', action='store_true')
     p.add_argument('--seq-len', type=int, default=12)
     p.add_argument('--future-len', type=int, default=4)
     p.add_argument('--hidden', type=int, default=128)
@@ -140,32 +148,35 @@ def main():
     print("building mesh...")
     land_polygons = load_land_polygons(bounds, natural_earth_path=args.land_shp)
     ports = load_ports(args.ports_csv, bounds)
-    pts, land_flags = sample_domain_points(bounds, land_polygons, ports)
+    pts, land_flags = sample_domain_points(bounds, land_polygons, ports,
+                                            n_open_water=args.n_open_water,
+                                            n_coastal=args.n_coastal)
     mesh_node_features, mesh_edge_index, _ = build_mesh(pts, land_flags, ports)
     mesh_x_tensor = torch.as_tensor(mesh_node_features, dtype=torch.float, device='cpu')
     mesh_edge_tensor = torch.as_tensor(mesh_edge_index, dtype=torch.long, device='cpu')
     mesh_tree = cKDTree(mesh_node_features[:, :2])
-    print(f"  mesh nodes: {mesh_node_features.shape[0]}, edges: {mesh_edge_index.shape[1]}")
+    print(f"  mesh nodes: {mesh_node_features.shape[0]}, edges: {mesh_edge_index.shape[1]}", flush=True)
 
     paths = sorted(glob.glob(args.ais_glob))
     if not paths:
         raise FileNotFoundError(f"no AIS files matched {args.ais_glob}")
-    print(f"loading {len(paths)} AIS file(s)...")
-    dfs = []
-    for p in paths:
-        d = load_dma_ais_csv(p, bounds, pd.Timestamp.min, pd.Timestamp.max)
-        print(f"  {p}: {len(d)} records")
-        dfs.append(d)
-    ais_df = pd.concat(dfs, ignore_index=True).sort_values('timestamp')
-    print(f"  total: {len(ais_df)} records, {ais_df['mmsi'].nunique()} vessels")
+    print(f"loading {len(paths)} AIS file(s)...", flush=True)
 
-    print("resampling to snapshots...")
-    ais_snapshots = resample_to_snapshots(ais_df, interval_minutes=args.interval_minutes)
-    print(f"  timestamps: {len(ais_snapshots)}")
+    # Load + resample is expensive (~25 min for 12 days) and identical on
+    # every job, so it is cached to disk keyed by the input files and the
+    # resampling interval. This matters most for sweeps, which would
+    # otherwise repeat the same work once per configuration.
+    ais_snapshots, vessel_stats = load_and_resample_cached(
+        paths, bounds, args.interval_minutes,
+        loader_fn=lambda pth, bnds: load_dma_ais_csv(pth, bnds, pd.Timestamp.min, pd.Timestamp.max),
+        resampler_fn=lambda df, iv: resample_to_snapshots(df, interval_minutes=iv),
+        cache_dir=args.cache_dir, force_rebuild=args.no_cache)
+    print(f"  timestamps: {len(ais_snapshots)}", flush=True)
 
-    print("selecting ego vessels...")
-    good = select_ego_vessels_stratified(
-        ais_df, min_pings=args.min_pings, sog_threshold_knots=args.sog_threshold_knots,
+    print("selecting ego vessels...", flush=True)
+    good = select_ego_vessels_from_stats(
+        vessel_stats, min_pings=args.min_pings,
+        sog_threshold_knots=args.sog_threshold_knots,
         n_underway=args.n_underway, n_stationary=args.n_stationary)
     print(f"  {good['regime'].value_counts().to_dict()}")
     train_ids, val_ids = split_vessels_train_val(good, args.val_fraction, args.val_seed)
@@ -177,8 +188,8 @@ def main():
         ais_snapshots, mesh_node_features, mesh_edge_index,
         mesh_x_tensor, mesh_edge_tensor, mesh_tree,
         progress_every=max(1, len(ais_snapshots)//10))
-    world = [d.to(device) for d in world]
-    print(f"  {len(world)} world snapshots on {device}")
+    world = share_mesh_on_device(world, device)
+    print(f"  {len(world)} world snapshots on {device}", flush=True)
 
     train_ds = build_datasets(train_ids, world, row_maps, args.seq_len, args.future_len,
                                stride=args.window_stride)
@@ -212,11 +223,14 @@ def main():
     if norm_scale is None:
         print("computing delta normalization scale (train vessels only)...")
         deltas = []
-        for ctx, ego_rows, target in train_combined:
+        # no_grad: this loop touches every training window and never
+        # backprops, so building autograd state for it is pure waste
+        with torch.no_grad():
+          for ctx, ego_rows, target in train_combined:
             anchor = ctx[-1]['vessel'].x[ego_rows[-1], :2]
             deltas.append((target - anchor.unsqueeze(0)).cpu())
         norm_scale = torch.cat(deltas, dim=0).std().item()
-    print(f"  norm_scale: {norm_scale:.5f}")
+    print(f"  norm_scale: {norm_scale:.5f}", flush=True)
 
     print(f"training (batch_size={args.batch_size}, gnn_chunk={args.gnn_chunk_size})...")
     for epoch in range(start_epoch, args.n_epochs):

@@ -10,6 +10,7 @@ and shared; each vessel's dataset holds index pairs into it.
 """
 import argparse
 import glob
+import json
 import os
 import numpy as np
 import pandas as pd
@@ -72,6 +73,12 @@ def parse_args():
     p.add_argument('--n-epochs', type=int, default=50)
     p.add_argument('--val-fraction', type=float, default=0.2)
     p.add_argument('--val-seed', type=int, default=42)
+    p.add_argument('--val-every', type=int, default=5,
+                   help='run held-out validation every N epochs (0 disables)')
+    p.add_argument('--val-subsample', type=int, default=400,
+                   help='windows scored in the periodic check; final run uses all')
+    p.add_argument('--early-stop-patience', type=int, default=0,
+                   help='stop if validation has not improved for N checks (0 = never)')
     p.add_argument('--checkpoint-path', type=str, default='checkpoints/checkpoint.pt')
     p.add_argument('--resume', action='store_true')
     p.add_argument('--distributed', action='store_true',
@@ -115,10 +122,20 @@ def build_datasets(vessel_ids, world, row_maps, seq_len, future_len, stride=1):
 
 
 @torch.no_grad()
-def run_validation(model, dataset, norm_scale, n_samples=32, min_move_km=1.0):
+def run_validation(model, dataset, norm_scale, n_samples=32, min_move_km=1.0,
+                    max_windows=None, seed=0):
+    """
+    Held-out metrics. `max_windows` subsamples for the periodic in-training
+    check -- scoring every window each epoch costs more than the epoch
+    itself, and a few hundred is enough to see whether validation tracks
+    training or diverges from it. The final run uses the full set.
+    """
     model.eval()
     disps, spreads, errs, base = [], [], [], []
-    for i in range(len(dataset)):
+    idxs = range(len(dataset))
+    if max_windows is not None and max_windows < len(dataset):
+        idxs = np.random.default_rng(seed).choice(len(dataset), max_windows, replace=False)
+    for i in idxs:
         ctx, ego_rows, target = dataset[i]
         dev = next(model.parameters()).device
         ctx = [d.clone().to(dev) for d in ctx]          # clone: leave CPU originals intact
@@ -138,7 +155,7 @@ def run_validation(model, dataset, norm_scale, n_samples=32, min_move_km=1.0):
             errs.append(haversine_km(c[0], c[1], truth[0], truth[1]))
             base.append(moved)
 
-    res = {'n_val_windows': len(dataset),
+    res = {'n_val_windows': len(disps),
            'spread_correlation': float(np.corrcoef(disps, spreads)[0, 1]) if len(disps) > 1 else float('nan')}
     if errs:
         errs, base = np.array(errs), np.array(base)
@@ -251,7 +268,17 @@ def main():
         norm_scale = torch.cat(deltas, dim=0).std().item()
     rank0_print(f"  norm_scale: {norm_scale:.5f}")
 
-    print(f"training (batch_size={args.batch_size}, gnn_chunk={args.gnn_chunk_size})...")
+    best_path = args.checkpoint_path.replace('.pt', '_best.pt')
+    history_path = args.checkpoint_path.replace('.pt', '_history.json')
+    history, best_val, best_epoch, stale_checks = [], None, None, 0
+    if args.resume and os.path.exists(args.checkpoint_path):
+        _ck = torch.load(args.checkpoint_path, map_location='cpu')
+        history = _ck.get('history', [])
+        best_val = _ck.get('best_val_error_km')
+        best_epoch = _ck.get('best_epoch')
+
+    rank0_print(f"training (batch_size={args.batch_size}, gnn_chunk={args.gnn_chunk_size}, "
+                f"val every {args.val_every} epochs on {args.val_subsample} windows)...")
     for epoch in range(start_epoch, args.n_epochs):
         model.train()
         total, n_win = 0.0, 0
@@ -269,13 +296,50 @@ def main():
             n_win += len(windows)
 
         avg = all_reduce_mean(total / max(n_win, 1), device)
-        rank0_print(f"epoch {epoch}: avg loss = {avg:.4f}")
+
+        val_line, val_err = "", None
+        do_val = (args.val_every and val_combined is not None and len(val_combined) > 0
+                  and ((epoch + 1) % args.val_every == 0 or epoch == args.n_epochs - 1))
+        if do_val and is_main_process():
+            vres = run_validation(unwrap(model), val_combined, norm_scale,
+                                   max_windows=args.val_subsample, seed=args.val_seed)
+            val_err = vres.get('model_mean_error_km')
+            history.append({'epoch': epoch, 'train_loss': avg, **vres})
+            val_line = (f" | val err {val_err:.3f} km"
+                        f" (baseline {vres.get('trivial_baseline_mean_error_km', float('nan')):.3f})"
+                        f" corr {vres.get('spread_correlation', float('nan')):.3f}")
+            model.train()
+
+        rank0_print(f"epoch {epoch}: avg loss = {avg:.4f}{val_line}")
+
+        if val_err is not None:
+            if best_val is None or val_err < best_val - 1e-6:
+                best_val, best_epoch, stale_checks = val_err, epoch, 0
+                if is_main_process():
+                    torch.save({'model_state_dict': unwrap(model).state_dict(),
+                                'optimizer_state_dict': opt.state_dict(),
+                                'norm_scale': norm_scale, 'epoch': epoch,
+                                'avg_loss': avg, 'val_error_km': val_err,
+                                'args': vars(args)}, best_path)
+            else:
+                stale_checks += 1
+
         if is_main_process():
             torch.save({'model_state_dict': unwrap(model).state_dict(),
                     'optimizer_state_dict': opt.state_dict(),
                         'norm_scale': norm_scale, 'epoch': epoch, 'avg_loss': avg,
+                        'history': history, 'best_val_error_km': best_val,
+                        'best_epoch': best_epoch,
                         'args': vars(args)}, args.checkpoint_path)
+            if history:
+                with open(history_path, 'w') as f:
+                    json.dump(history, f, indent=2)
         barrier()
+
+        if args.early_stop_patience and stale_checks >= args.early_stop_patience:
+            rank0_print(f"early stop: no improvement for {stale_checks} checks "
+                        f"(best {best_val:.3f} km @ epoch {best_epoch})")
+            break
 
     rank0_print("training complete.")
     # validation on rank 0 only -- it is cheap next to training, and

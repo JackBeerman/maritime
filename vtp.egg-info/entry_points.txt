@@ -1,3 +1,0 @@
-[console_scripts]
-vtp-benchmark-build = vtp.benchmark.build:main
-vtp-train = vtp.training.train:main

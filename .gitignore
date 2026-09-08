@@ -32,3 +32,6 @@ venv
 data/
 venv
 data/
+*.egg-info/
+build/
+dist/

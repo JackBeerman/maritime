@@ -1,0 +1,118 @@
+{
+  "persistence": {
+    "predictor": "persistence",
+    "n_windows": 1898,
+    "n_moving": 928,
+    "ade_km": 3.9297552271526097,
+    "fde_km": 6.164376187564524,
+    "min_ade_km": 3.929755227152574,
+    "min_fde_km": 6.164376187564499,
+    "energy_score": 15.719020908610297,
+    "ade_km_moving": 7.938361364877283,
+    "fde_km_moving": 12.552772168960239,
+    "median_horizon_min": 61.675,
+    "spread_error_corr": NaN,
+    "spread_displacement_corr": NaN,
+    "by_horizon": {
+      "60-120min": {
+        "n": 911,
+        "ade_km": 7.893844446045863,
+        "fde_km": 12.414710511628384
+      },
+      ">120min": {
+        "n": 17,
+        "ade_km": 10.323944485784558,
+        "fde_km": 19.951252747155408
+      }
+    },
+    "fde_skill_vs_constant-velocity": -1.0467835241655834,
+    "ade_skill_vs_constant-velocity": -1.2074908146163583
+  },
+  "constant-velocity": {
+    "predictor": "constant-velocity",
+    "n_windows": 1898,
+    "n_moving": 928,
+    "ade_km": 1.9843774219497674,
+    "fde_km": 3.3421075767443122,
+    "min_ade_km": 1.9843774219497685,
+    "min_fde_km": 3.342107576744275,
+    "energy_score": 7.937509687799074,
+    "ade_km_moving": 3.5961016518462374,
+    "fde_km_moving": 6.1329261354483755,
+    "median_horizon_min": 61.675,
+    "spread_error_corr": NaN,
+    "spread_displacement_corr": NaN,
+    "by_horizon": {
+      "60-120min": {
+        "n": 911,
+        "ade_km": 3.077604180086459,
+        "fde_km": 5.382414246176705
+      },
+      ">120min": {
+        "n": 17,
+        "ade_km": 31.38146616791436,
+        "fde_km": 46.35153384877146
+      }
+    },
+    "fde_skill_vs_constant-velocity": 0.0,
+    "ade_skill_vs_constant-velocity": 0.0
+  },
+  "ctrv": {
+    "predictor": "ctrv",
+    "n_windows": 1898,
+    "n_moving": 928,
+    "ade_km": 1.8972119754522516,
+    "fde_km": 3.3424047360739704,
+    "min_ade_km": 1.8972119754522399,
+    "min_fde_km": 3.3424047360739437,
+    "energy_score": 7.588847901808959,
+    "ade_km_moving": 3.590075880244498,
+    "fde_km_moving": 6.456808136253127,
+    "median_horizon_min": 61.675,
+    "spread_error_corr": NaN,
+    "spread_displacement_corr": NaN,
+    "by_horizon": {
+      "60-120min": {
+        "n": 911,
+        "ade_km": 3.4455248058629753,
+        "fde_km": 6.160128818108407
+      },
+      ">120min": {
+        "n": 17,
+        "ade_km": 11.336312866219021,
+        "fde_km": 22.355329243890736
+      }
+    },
+    "fde_skill_vs_constant-velocity": -0.05281035408737589,
+    "ade_skill_vs_constant-velocity": 0.001675639952682051
+  },
+  "cv+noise": {
+    "predictor": "cv+noise",
+    "n_windows": 1898,
+    "n_moving": 928,
+    "ade_km": 2.1684934362007993,
+    "fde_km": 3.626267421718236,
+    "min_ade_km": 2.136868632802354,
+    "min_fde_km": 2.6727974607044303,
+    "energy_score": 7.700894596046115,
+    "ade_km_moving": 3.644314411540565,
+    "fde_km_moving": 6.183001876325577,
+    "median_horizon_min": 61.675,
+    "spread_error_corr": 0.26212979506346534,
+    "spread_displacement_corr": 0.05871795614015315,
+    "by_horizon": {
+      "60-120min": {
+        "n": 911,
+        "ade_km": 3.121867784894517,
+        "fde_km": 5.426317713552637
+      },
+      ">120min": {
+        "n": 17,
+        "ade_km": 31.64130716886704,
+        "fde_km": 46.73237083433431
+      }
+    },
+    "fde_skill_vs_constant-velocity": -0.00816506505561243,
+    "ade_skill_vs_constant-velocity": -0.013406951293930991
+  }
+}

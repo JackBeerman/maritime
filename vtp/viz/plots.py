@@ -120,7 +120,10 @@ def setup(ais_path="/scratch/jtb3sud/maritime/ais/aisdk-2026-08-25.csv",
             continue
         # each snapshot keeps its own mesh copy -- sharing one tensor
         # caused a CUDA device-side assert once training ran at scale
-        snaps = [d.to(device) for d in snaps]
+        # snapshots stay on CPU; sample_positions moves each window's copy
+        # to the device. Moving a whole evaluation set to GPU duplicates
+        # the mesh per snapshot, which is what OOM'd training.
+        snaps = [d for d in snaps]
         ds = IrregularVesselDataset(snaps, ego_idx, times, positions,
                                      seq_len=seq_len, future_len=future_len)
         if len(ds) > 0:
@@ -172,9 +175,15 @@ def sample_positions(model, dataset, idx, vel_scale, n_samples=32, eps=1e-6):
     """
     ctx, ctx_times, target_pos, target_dts = dataset[idx]
     ego_rows = [int(d['vessel'].ego_mask.nonzero()[0].item()) for d in ctx]
-    anchor = ctx[-1]['vessel'].x[ego_rows[-1], :2]
-    dts = target_dts.to(anchor.device)
 
+    device = next(model.parameters()).device
+    # clone before moving: HeteroData.to() mutates in place, and these
+    # snapshots are shared across overlapping windows
+    ctx = [d.clone().to(device) for d in ctx]
+    target_pos = target_pos.to(device)
+
+    anchor = ctx[-1]['vessel'].x[ego_rows[-1], :2]
+    dts = target_dts.to(device)
     out = model(ctx, ego_rows, ctx_times, dts, n_samples=n_samples)
     dt_col = dts.clamp(min=eps).view(1, 1, -1, 1)
     samples_real = out * vel_scale * dt_col + anchor

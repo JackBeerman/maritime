@@ -1,0 +1,39 @@
+device: cuda | world size: 1
+building mesh...
+  mesh nodes: 5581, edges: 16717
+loading 1 AIS file(s)...
+  /scratch/jtb3sud/maritime/ais/aisdk-2026-08-25.csv: 26571570 records
+  total: 26571570 records, 6640 vessels
+selecting ego vessels...
+  {'underway': 30, 'stationary': 30}
+  train vessels: 48, val vessels: 12
+building ego-anchored datasets (no resampling)...
+  train windows: 1659 across 33 vessels
+  val windows: 515 across 11 vessels
+computing velocity normalization scale (train vessels only)...
+  vel_scale: 1.428e-05 deg/sec
+training...
+epoch 0: avg loss = 2.3603
+epoch 1: avg loss = 2.1503
+epoch 2: avg loss = 1.7292
+epoch 3: avg loss = 1.5763
+epoch 4: avg loss = 1.2745
+epoch 5: avg loss = 1.1942
+epoch 6: avg loss = 1.0667
+epoch 7: avg loss = 0.9972
+epoch 8: avg loss = 1.0249
+epoch 9: avg loss = 0.9317
+epoch 10: avg loss = 0.9471
+epoch 11: avg loss = 0.9397
+epoch 12: avg loss = 0.8034
+epoch 13: avg loss = 0.8347
+epoch 14: avg loss = 0.8829
+epoch 15: avg loss = 0.7575
+epoch 16: avg loss = 0.7162
+epoch 17: avg loss = 0.6732
+epoch 18: avg loss = 0.6653
+epoch 19: avg loss = 0.6115
+training complete.
+
+validation on held-out vessels...
+Job finished with exit code 1

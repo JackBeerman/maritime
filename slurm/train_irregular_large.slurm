@@ -15,7 +15,7 @@ source venv/bin/activate
 
 export CUDA_LAUNCH_BLOCKING=1
 
-python3 train_irregular.py \
+python3 -m vtp.training.train \
     --ais-glob "/scratch/jtb3sud/maritime/ais/aisdk-*.csv" \
     --land-shp data/ne_10m_land/ne_10m_land.shp \
     --ports-csv data/ports_denmark.csv \

@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/sfs/gpfs/tardis/home/jtb3sud/maritime-irregular/vtp/training/train.py", line 326, in <module>
+    if __name__ == '__main__':
+        ^^^^^^
+  File "/sfs/gpfs/tardis/home/jtb3sud/maritime-irregular/vtp/training/train.py", line 320, in main
+    print("\nvalidation on held-out vessels...", flush=True)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/sfs/gpfs/tardis/home/jtb3sud/maritime/venv/lib/python3.13/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+  File "/sfs/gpfs/tardis/home/jtb3sud/maritime-irregular/vtp/training/train.py", line 168, in run_validation
+    # model's device rather than mutating the shared originals
+NameError: name 'device' is not defined

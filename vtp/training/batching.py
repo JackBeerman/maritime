@@ -70,16 +70,23 @@ def encode_windows_batched(model, windows, gnn_chunk_size=16, device=None):
     return model.temporal(seq, times)[:, -1, :]
 
 
-def batch_timing_and_targets(windows, device):
+def batch_timing_and_targets(windows, device=None):
     """
     anchors (B, 2), target positions (B, F, 2), target dts (B, F).
-    Anchors come from each window's last context snapshot, read at that
-    window's own ego row.
+
+    Anchors are read from CPU snapshots (see the module docstring), so
+    they must be moved to the device alongside the targets -- they were
+    previously already on GPU because whole datasets lived there.
     """
     anchors, targets, dts = [], [], []
     for ctx, _, tpos, tdts in windows:
         ego = int(ctx[-1]['vessel'].ego_mask.nonzero()[0].item())
         anchors.append(ctx[-1]['vessel'].x[ego, :2])
-        targets.append(tpos.to(device))
-        dts.append(tdts.to(device))
-    return torch.stack(anchors), torch.stack(targets), torch.stack(dts)
+        targets.append(tpos)
+        dts.append(tdts)
+    anchors = torch.stack(anchors)
+    targets = torch.stack(targets)
+    dts = torch.stack(dts)
+    if device is not None:
+        anchors, targets, dts = anchors.to(device), targets.to(device), dts.to(device)
+    return anchors, targets, dts

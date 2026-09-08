@@ -158,16 +158,22 @@ def compute_velocity_scale(dataset, eps=1e-6):
 @torch.no_grad()
 def run_validation(model, dataset, vel_scale, n_samples=32, min_move_km=1.0, eps=1e-6):
     model.eval()
-    disps, spreads, errs, base_errs, dts = [], [], [], [], []
+    device = next(model.parameters()).device
+    disps, spreads, errs, base_errs, hors = [], [], [], [], []
 
     for i in range(len(dataset)):
         ctx, ctx_times, target_pos, target_dts = dataset[i]
         ego_i = [d['vessel'].ego_mask.nonzero()[0].item() for d in ctx]
+        # snapshots live on CPU now; move this window's copies to the
+        # model's device rather than mutating the shared originals
+        ctx = [d.clone().to(device) for d in ctx]
+        target_pos = target_pos.to(device)
+        target_dts_dev = target_dts.to(device)
         anchor = ctx[-1]['vessel'].x[ego_i[-1], :2]
 
-        out = model(ctx, ego_i, ctx_times, target_dts.to(anchor.device), n_samples=n_samples)
-        dt = target_dts.to(anchor.device).clamp(min=eps).view(1, 1, -1, 1)
-        pred = out * vel_scale * dt + anchor           # (1, S, F, 2)
+        out = model(ctx, ego_i, ctx_times, target_dts_dev, n_samples=n_samples)
+        dt_col = target_dts_dev.clamp(min=eps).view(1, 1, -1, 1)
+        pred = out * vel_scale * dt_col + anchor          # (1, S, F, 2)
 
         final = pred[0, :, -1, :].cpu().numpy()
         truth = target_pos[-1].cpu().numpy()
@@ -179,13 +185,13 @@ def run_validation(model, dataset, vel_scale, n_samples=32, min_move_km=1.0, eps
 
         disps.append(moved)
         spreads.append(spread)
-        dts.append(float(target_dts[-1]))
+        hors.append(float(target_dts[-1]))               # accumulator, not the tensor
         if moved > min_move_km:
             errs.append(haversine_km(center[0], center[1], truth[0], truth[1]))
             base_errs.append(moved)
 
     res = {'n_val_windows': len(dataset),
-           'median_target_horizon_min': float(np.median(dts)) / 60.0,
+           'median_target_horizon_min': float(np.median(hors)) / 60.0,
            'spread_correlation': float(np.corrcoef(disps, spreads)[0, 1]) if len(disps) > 1 else float('nan')}
     if errs:
         errs, base_errs = np.array(errs), np.array(base_errs)

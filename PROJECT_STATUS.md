@@ -1,272 +1,193 @@
-# Maritime Vessel Trajectory Prediction — Project Status & Handoff
+# Project Status & Handoff
 
 Repo: https://github.com/JackBeerman/maritime
 Environment: UVA Rivanna HPC, account `sds_baek_energetic`, user `jtb3sud`
 
-**Two git worktrees, one repo:**
-- `~/maritime` — always on `main` (fixed 15-minute interval sampling)
-- `~/maritime-irregular` — always on `irregular-sampling` (raw irregular pings)
+**Two branches, two worktrees:**
 
-Worktrees rather than `git checkout` because SLURM jobs read code from
-disk at launch; switching branches in a shared directory can hand a
-queued job the wrong branch's files. Each worktree has its own files but
-shares history and remote. Bulk AIS data lives at
-`/scratch/jtb3sud/maritime/ais/` (12 days, 2026-08-18 .. 2026-08-29,
-~236M records total); `venv` and `data/` are symlinked into the
-irregular worktree and gitignored.
+| branch | worktree | role |
+|---|---|---|
+| `irregular-sampling` | `~/maritime-irregular` | **primary model** — raw AIS reports at true times, packaged as `vtp/` |
+| `main` | `~/maritime` | comparison arm — fixed 15-minute resampling, flat layout |
 
-## What this project is
+Worktrees rather than `git checkout`, because SLURM jobs read code from
+disk at launch and switching branches in a shared directory can hand a
+queued job the wrong files. Bulk AIS lives at
+`/scratch/jtb3sud/maritime/ais/` (12 days, 2026-08-18 … 2026-08-29,
+~236M records); `venv` and `data/` are symlinked into the irregular
+worktree and gitignored.
 
-Predicts a single "ego" vessel's future positions from its recent AIS
-track, surrounding traffic, and coastline/port geometry — outputting a
-**distribution of plausible futures** via sampling, not a point estimate.
+> The GitHub **default branch** should be set to `irregular-sampling`
+> (Settings → Branches) so visitors land on the primary model. Renaming
+> the branches themselves was deliberately avoided — with two worktrees
+> checked out it invites a history-rewrite mess for no real gain.
 
-Architecture and key decisions follow DeepMind's weather-forecasting
-lineage:
-- **GraphCast** — mesh + GNN spatial structure, and predicting a
-  **residual** from the last known state rather than an absolute value.
-- **WeatherNext FGN** — a sampling head producing many trajectories per
-  forward pass, trained with an energy score loss.
+## What this is
+
+Vessel trajectory prediction as a **distribution of plausible futures**,
+following DeepMind's weather-forecasting lineage: GraphCast's mesh + GNN
+structure and residual prediction, and WeatherNext's FGN sampling head
+trained with an energy score loss.
 
 Domain: Danish waters, using the Danish Maritime Authority's public AIS
-archive (`http://aisdata.ais.dk/aisdk-YYYY-MM-DD.zip`).
+archive.
 
-**Naming note:** the model class is still `GCVTP` ("Goal-Conditioned
-Vessel Trajectory Predictor") from a pre-rebuild design.
-Goal-conditioning was fully removed; the name is legacy.
+## Current state
 
-## Current status
+### Primary: `irregular-sampling`
 
-### `main` — fixed 15-minute intervals
+- Reorganized into a `vtp/` package (`data`, `models`, `training`,
+  `benchmark`, `viz`), installed with `pip install -e .`.
+- **Portable benchmark harness** — the piece intended for the paper. A
+  benchmark set is a single `.npz`; any model enters by implementing one
+  `predict` method with no dependency on this codebase.
+- Best measured run so far (one day, 20 epochs, ~62 min horizon):
+  spread correlation 0.436, 9.77 km error vs 10.45 km persistence.
+  Not yet scored on the benchmark.
 
-Best completed run (1 day, 190 train / 47 val vessels, 50 epochs,
-held-out validation):
-- spread-vs-displacement correlation **0.719**
-- beat "assume no movement" baseline on **78.6%** of moving windows
-  (6.97 km vs 11.56 km mean error)
+### Comparison: `main`
 
-**A 12-day run is in progress** (480 train / 120 val vessels, 113,785
-train windows, `--seq-len 12`, `hidden 128`). Confirms the dedup fix
-works — 1,152 shared world snapshots on GPU, no OOM. But it runs at
-**~2 hours/epoch**, so it will hit the 12-hour wall around epoch 6.
-`--resume` works, so nothing is lost; results at the wall should still
-be informative (~6 epochs × 113k windows is roughly 75 epochs' worth of
-gradient updates at the previous data scale).
+- Best run (12 days, 5 epochs): correlation 0.753, 5.37 km error on
+  moving vessels, 82.4% beats persistence.
+- A 60-epoch run reached epoch 53 with training loss still declining
+  (0.5016). Loss shown during training is **training** loss; validation
+  only ran at the end in that job.
 
-### `irregular-sampling` — raw irregular pings
+### Benchmark reference: `danish_60min`
 
-Built and unit-tested; **no completed training run yet.** A smoke test
-(40 vessels, 18,246 windows) trained cleanly (loss 1.21 → 0.61 in one
-epoch) but timed out. A larger run is in progress and has not completed
-an epoch — almost certainly just slow (~7 h/epoch projected at 150+150
-vessels), not hung.
+1,898 windows, 193 vessels, ~62 min median horizon, 953 moving / 945
+stationary.
 
-## THE BINDING CONSTRAINT: `batch_size=1`
+| method | ADE (moving) | FDE (moving) | skill vs CV |
+|---|---|---|---|
+| persistence | 7.94 km | 12.55 km | −1.05 |
+| **constant velocity** | **3.60 km** | **6.13 km** | 0.00 |
+| CTRV | 3.59 km | 6.46 km | −0.05 |
 
-Both branches now produce 100k+ training windows and **neither can
-complete epochs at a usable rate.** Every optimization so far
-(KD-tree neighbour search, world-snapshot dedup, mesh sharing) addressed
-*memory* and *setup* cost; none touched per-step training throughput.
+**Constant velocity at 6.13 km FDE is the bar.** CTRV does not beat it —
+turn rate from three noisy AIS points is unreliable, and extrapolating an
+arc an hour ahead amplifies the noise. That is a useful negative result:
+manoeuvring has to be learned, not extrapolated.
 
-Each step is one forward/backward over a full GNN (~5,600 mesh nodes +
-thousands of vessels) for a single window, so the A100 is largely idle
-on Python and graph overhead.
+## Next steps
 
-**Next work, in priority order:**
+1. **Score both models on `danish_60min`.** Until that happens there is
+   no like-for-like comparison, and no defensible table row. The
+   benchmark adapter (`vtp/benchmark/adapters.py`) has never been run
+   against trained weights — expect to debug it.
+2. **Full training run with periodic validation** on the irregular
+   branch. `--val-every 5` now saves a separate `_best.pt`; earlier runs
+   could silently overwrite their own best weights.
+3. **Add Rate-of-Turn.** Failure analysis found turn angle separates the
+   worst-predicted windows from the best by a factor of 4, and AIS
+   carries an ROT field that ingest currently discards. Highest-value
+   untried experiment.
+4. **Mesh ablation.** The scaling sweep found error varies only
+   4.45–4.80 km across a 12× range of mesh density while cost doubles.
+   Worth training with the mesh removed entirely — if nothing changes, a
+   large part of the architecture is dead weight.
+5. **Resolve the CUDA assert.** Intermittent, always inside
+   `encode_windows_batched`. `CUDA_LAUNCH_BLOCKING=1` avoids it. Two
+   suspected causes were ruled out (mesh sharing, index bounds).
 
-1. **Batching.** PyG supports batching heterogeneous graphs of variable
-   size; plausibly 5-10x throughput. Invasive — touches the training
-   loop, collate function, and ego-vessel indexing, which has produced
-   two real bugs already — so it should be its own isolated change with
-   its own tests. This is now what blocks using the collected data.
-2. **Window subsampling.** A stride knob in `VesselSequenceDataset`
-   so window count is something you control rather than a function of
-   data volume. ~30 minutes of work; gets both branches running today at
-   reduced data.
-3. **Epoch-count sanity.** With 12x the data, 50 epochs was never the
-   right target — gradient updates matter, not epochs. 10-15 epochs at
-   the new scale ≈ 100-150 at the old.
-4. **CPU RAM on multi-day loads.** Concatenating 12 daily CSVs into one
-   DataFrame (~236M records) OOM'd a 64 GB job. Structural fix: load and
-   resample each day separately, keep only the (much smaller) resampled
-   snapshots, free each DataFrame before the next. Would cut peak CPU
-   memory ~12x. Currently worked around with `--mem`.
+## Key findings
 
-## Architecture
+**Turning dominates failures.** Worst-20% vs best-20% of held-out
+windows:
 
-1. **Spatial mesh** (`mesh.py`) — Delaunay triangulation over the
-   domain, denser near coastlines and ports. Built once from Natural
-   Earth coastline + Danish ports CSV. Node features
-   `[lon, lat, is_land, is_port]` (raw coordinates).
-2. **Graph per timestep** (`graph_data.py`) — mesh nodes + vessel nodes;
-   edges `mesh-to-mesh` (triangulation), `vessel-near-mesh` (3 nearest),
-   `vessel-near-vessel` (6 nearest). KD-tree neighbour search.
-3. **GNN encoder** (`model.py: MeshVesselGNN`) — two `SAGEConv`
-   heterogeneous layers, mean aggregation. Normalizes lon/lat (to domain
-   bounds) and SOG internally; stored tensors keep raw values because
-   k-NN, targets and plotting all read columns 0-1 as real coordinates.
-4. **Cached causal transformer** (`cached_attention.py`) — full-window
-   pass for training, incremental KV-cached `.step()` for streaming
-   rollout. Verified exact against full recompute (~1e-6 CPU).
-5. **FGN sampling head** — context + noise → many trajectory samples.
-   Output is a **normalized residual**, not an absolute coordinate.
-
-### Feature layouts (differ by branch)
-
-`main` (12 dims):
-`[lon, lat, sog, cog_sin, cog_cos, *type_onehot(7)]`
-
-`irregular` (14 dims):
-`[lon, lat, sog, cog_sin, cog_cos, dt_norm, staleness_norm, *type_onehot(7)]`
-
-COG is sin/cos encoded (a raw 0-359 scalar implies 359° and 1° are
-nearly opposite); vessel type is one-hot (a raw id implies false
-ordering between categories).
-
-### How the branches differ
-
-| | `main` | `irregular-sampling` |
-|---|---|---|
-| Time handling | resample to 15-min bins, interpolate single gaps | raw pings, no interpolation |
-| Snapshot | one per timestamp, **shared by all ego vessels** | ego-anchored; neighbours = last report before that instant + staleness |
-| Positional encoding | learned, indexed by integer step | sinusoidal over **real elapsed seconds** |
-| Head conditioning | context + noise | context + noise + **target Δt** |
-| Target | position at fixed +15/30/45/60 min | actual observed pings at true elapsed times |
-| Normalization | displacement / global std | **velocity** (displacement ÷ Δt) / global std |
-| Dedup possible? | yes (world state is shared) | no (snapshots are per-ego-vessel); only mesh is shareable |
-
-Motivation for the irregular branch: measured per-vessel median ping
-intervals span **10s (p10) to 284s (p90)** — a 28x range. Fixed binning
-hides this and assumes uniform spacing, which is false in live
-operation.
-
-## Key findings from diagnostics
-
-**Failure mode is turning, decisively.** Comparing worst-20% to best-20%
-of held-out windows by error ratio:
-
-| factor | worst 20% | best 20% | ratio |
+| factor | worst | best | ratio |
 |---|---|---|---|
 | turn angle (deg) | 40.87 | 10.09 | **4.05** |
 | speed variability | 0.01 | 0.00 | 3.12 |
 | distance to port (km) | 83.65 | 87.04 | 0.96 |
 | vessels in snapshot | 3362 | 3228 | 1.04 |
-| SOG (knots) | 5.73 | 7.53 | 0.76 |
 
 Nothing but turning (and speed variability, likely correlated)
-distinguishes failures. Not congestion, not port proximity. Prompted the
-move to `--seq-len 12` (3 h lookback) so the model can see turn *rate*,
-not just current heading. **AIS Rate-of-Turn (ROT) is still dropped
-during ingest** — adding it is the obvious untried next feature.
+distinguishes them. Not congestion, not port proximity.
 
-**Error grows linearly with horizon**, not exponentially:
-+15 min 1.59 km, +30 min 3.43 km, +45 min 5.43 km, +60 min 7.58 km
-(~1.9 km per step). Longer forecasts degrade predictably.
+**Error grows linearly with horizon**, not exponentially: 1.59 / 3.43 /
+5.43 / 7.58 km at +15/30/45/60 min.
 
-**Longer windows cost less data than expected**: 2 h → 4 h total span
-drops windows only 22% (1177 → 919), though vessel count falls faster
-(32 → 22), which matters more for generalization.
+**Reporting intervals span 28×** across vessels (10 s to 284 s per-vessel
+median) — the measurement that motivated the irregular branch.
 
-## Key bugs found and fixed
+**Scaling sweeps** (one day, 15 epochs; trends only): mesh density has
+no measurable effect; longer context improves calibration (0.43 → 0.67)
+with best error at `seq_len 16`; the model is near parity with dead
+reckoning across most configurations.
 
-1. **KV cache concatenation** — concatenated along the heads dimension
-   instead of sequence. Silent corruption, not a crash.
-2. **`pyg-lib` dependency** — PyG's `knn_graph()` needs an optional
-   package with version-pinned wheels. Replaced with in-repo KD-tree.
+## Bugs found and fixed
+
+1. **KV cache concatenation** along the heads dimension instead of
+   sequence. Silent corruption, not a crash.
+2. **`pyg-lib` dependency** — replaced PyG's `knn_graph` with an in-repo
+   KD-tree implementation to drop a version-pinned optional package.
 3. **NaN from blank SOG/COG** — real AIS legitimately has these; the
-   resampler only checked `lon`. Now checks all of lon/lat/sog/cog.
-4. **Absolute-coordinate targets (the big one)** — loss was dominated by
-   a task-irrelevant ~55°N offset. Switched to residual displacement,
-   matching GraphCast. Correlation ~0 → 0.19.
-5. **Missing output normalization** — targets normalized to unit
-   variance took correlation 0.19 → **0.68**. Single biggest lever in
-   the project.
-6. **`HeteroData.to(device)` mutates in place** — combined with sliding
-   windows sharing snapshot objects, calling it per-batch silently
-   corrupted other windows mid-epoch. Fixed by moving to device once at
-   dataset-build time.
-7. **`inference.py` not updated for delta targets** — treated raw output
-   as absolute position during rollout.
-8. **World-snapshot duplication → CUDA OOM** — a graph was built per
-   *(ego vessel, timestamp)*, but the world at a timestamp is identical
-   regardless of which vessel you're forecasting. Measured **856x**
-   redundancy (3.6 GB → 4.3 MB on a 300-vessel benchmark); at full scale
-   178-710 GB vs 1.2 GB needed. Fixed on `main` by building one shared
-   graph per timestamp with the ego row index carried alongside; the
-   irregular branch can only share the mesh (~32%), since its snapshots
-   are genuinely per-ego-vessel.
-9. **CPU RAM OOM on 12-day load** — unrelated to the GPU fix; see next
-   steps item 4.
-10. **GPU non-determinism (not a bug)** — a ~2% divergence in a
-    cache-vs-recompute check is ordinary CUDA scatter nondeterminism,
-    reproducible with two plain GNN calls on identical input.
+   resampler only checked `lon`.
+4. **Absolute-coordinate targets** — loss dominated by a
+   task-irrelevant ~55° N offset. Switching to residual displacement
+   (matching GraphCast) took spread correlation from ~0 to 0.19.
+5. **Missing output normalization** — unit-variance normalization took
+   it to **0.68**. Single largest improvement in the project.
+6. **`HeteroData.to()` mutates in place** — combined with sliding
+   windows sharing snapshot objects, per-batch device moves silently
+   corrupted other windows mid-epoch.
+7. **World-snapshot duplication → CUDA OOM** — a graph per *(vessel,
+   timestamp)* rather than per timestamp. **856×** redundancy measured.
+8. **Mesh duplication → 50 GB OOM** on the irregular branch, where
+   snapshots cannot be shared. Fixed by keeping snapshots on CPU and
+   moving one chunk at a time.
+9. **Device mismatches** after the CPU-storage change, in three places
+   (training targets, validation, viz).
+10. **Persistence reported as "the baseline"** — not a code bug, but the
+    most consequential error in how results were being read. Every
+    "beats baseline 89%" figure was against a bar that a straight line
+    clears trivially.
 
-## Design decisions and reasoning
+## Design decisions
 
-- **Stratified (not exclusive) vessel sampling.** Stationary vessels are
-  sampled, not excluded — a deployed predictor must handle "stays put."
-  The original failure was an *unbalanced* distribution plus a decoder
-  that couldn't express "it depends"; both are addressed.
-- **Single ego vessel, conditioned on others' past/current state only.**
-  Conditioning on neighbours' *future* state would be an oracle leak.
-  Joint multi-vessel prediction is a legitimate later step.
-- **Train/val split by vessel, not window.** Windows from one vessel are
-  highly correlated; a window-level split would leak and overstate
-  generalization.
+- **Stationary vessels are sampled, not excluded.** A deployed predictor
+  must handle "stays put" as a valid outcome. The original failure was
+  an *unbalanced* distribution plus a decoder that could not express
+  "it depends".
+- **Single ego vessel, conditioned on others' past state only.**
+  Conditioning on neighbours' futures would be an oracle leak.
+- **Train/val splits by vessel, not window.** Windows from one vessel
+  overlap heavily; a window-level split leaks.
+- **Benchmark windows come from raw pings**, never resampled, so the
+  format does not privilege either branch. A fixed-interval model may
+  resample internally — that information loss is part of what is
+  measured.
 - **Always segment AIS statistics by movement regime.** A naive
-  full-population displacement check (mixing stationary and underway)
-  gave a misleading near-zero median that would have led to a wrong
-  interval choice.
+  full-population displacement check gave a misleading near-zero median
+  that would have led to a wrong interval choice.
 
 ## Environment
 
 ```bash
-cd ~/maritime
 python3 -m venv venv && source venv/bin/activate
 pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu128
-pip install -r requirements.txt
+pip install torch_geometric
+pip install -e .          # irregular branch; main uses requirements.txt
 ```
+
 Validated: torch 2.9.1+cu128, torch_geometric 2.8.0.post1,
-geopandas 1.1.4, shapely 2.1.2. Runs on A100 and RTX A6000. No
-container — the venv is the tested environment.
+geopandas 1.1.4, shapely 2.1.2. Runs on A100 and RTX A6000.
 
-**Rivanna access:** `rivanna.hpc.virginia.edu` is dead; use
-`login.hpc.virginia.edu`. Off-campus SSH needs UVA VPN. Open OnDemand
-(`https://ood.hpc.virginia.edu`) works from anywhere without VPN.
+**Rivanna:** `rivanna.hpc.virginia.edu` is dead — use
+`login.hpc.virginia.edu`. Off-campus SSH needs UVA VPN; Open OnDemand
+(`ood.hpc.virginia.edu`) works without it. Code in `~` (200 GB,
+snapshotted); AIS in `/scratch` (10 TB, no backup, 90-day purge).
 
-**Storage:** code in `~/maritime` (200 GB quota, snapshotted); AIS in
-`/scratch/jtb3sud/maritime/ais/` (10 TB, no backup, 90-day inactivity
-purge).
+**Caching:** load + resample of 12 days takes ~46 minutes and is cached
+to `cache/` keyed by input files and interval, so it happens once.
 
 ## Running
 
 ```bash
-cd ~/maritime           && sbatch train_gcvtp.slurm       # fixed-interval
-cd ~/maritime-irregular && sbatch train_irregular.slurm    # irregular
+cd ~/maritime-irregular && sbatch slurm/train_irregular.slurm     # primary
+cd ~/maritime           && sbatch slurm/train.slurm                # comparison
 ```
-Always submit from the matching worktree. Both scripts use `--resume`,
-which is safe whether or not a checkpoint exists.
 
-Irregular-only knobs: `--min-ping-gap-sec` (thins dense pings; **this
-sets your effective forecast horizon** and is the most important one to
-tune), `--staleness-cutoff-sec`, `--neighbor-radius-deg`,
-`--max-neighbors`, `--max-window-span-sec`.
-
-## Open questions
-
-- **The branches aren't comparable yet.** `main` predicts a fixed 60 min
-  ahead; `irregular` predicts whatever the pings give (median ~14 min at
-  60 s thinning). A fair test needs matched horizons or evaluation at
-  common query times.
-- **`inference.py` not ported to the irregular branch.** The
-  Δt-conditioned head emits a whole trajectory in one pass, so
-  autoregressive rollout may not be needed at all — decide before
-  porting.
-- **Notebook cells are stale on `main`** — `VesselSequenceDataset` now
-  returns `(ctx, ego_rows, target)` (three values), and shared snapshots
-  carry no `ego_mask`. The prediction plots, GIF animation, and
-  failure-analysis cells all need updating to use `ego_rows`.
-- **Haversine vs Euclidean neighbours.** k-NN uses raw-degree Euclidean
-  distance; at higher latitudes a degree of longitude is shorter than a
-  degree of latitude. Denmark's narrow band (53.5-58.5°N) limits the
-  impact. Deferred as it means touching well-tested topology code.
+Always submit from the matching worktree. Both use `--resume`, safe
+whether or not a checkpoint exists.
